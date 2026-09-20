@@ -1,7 +1,7 @@
 {
   "name": "roblox-donation-proxy",
-  "version": "2.0.0",
-  "description": "Multi-Platform Donation Server (Saweria, Sociabuzz, BagiBagi) with Roblox MessagingService",
+  "version": "3.0.0",
+  "description": "Multi-Platform Donation Server (Saweria, Sociabuzz, BagiBagi) + Web Dashboard with Roblox MessagingService",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

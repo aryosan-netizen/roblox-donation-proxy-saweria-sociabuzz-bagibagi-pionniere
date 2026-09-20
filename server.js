@@ -2,9 +2,16 @@
 // Menggunakan Roblox Open Cloud MessagingService API - Direct Send (No Queue)
 
 const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+
 const app = express();
 
-app.use(express.json());
+app.set('trust proxy', 1);
+app.use(express.json({ limit: '100kb' }));
+app.use(express.urlencoded({ extended: false, limit: '100kb' }));
+app.use(express.static(path.join(__dirname, 'public')));
 
 // ============================================
 // KONFIGURASI - SESUAIKAN DENGAN SETTING KAMU
@@ -18,7 +25,23 @@ const CONFIG = {
     UNIVERSE_ID: process.env.UNIVERSE_ID || '10154774780',
     
     // Topic name untuk MessagingService (harus sama dengan di Roblox script)
-    MESSAGING_TOPIC: 'DonationNotif'
+    MESSAGING_TOPIC: 'DonationNotif',
+
+    // Password untuk login dashboard web (WAJIB diganti lewat env di production)
+    DASHBOARD_PASSWORD: process.env.DASHBOARD_PASSWORD || 'admin123',
+
+    // Jumlah maksimum log donasi yang disimpan di memori
+    MAX_LOG: Number(process.env.MAX_LOG) || 500,
+
+    // Lokasi file penyimpanan log (agar tidak hilang saat restart)
+    LOG_FILE: process.env.LOG_FILE || path.join(__dirname, 'data', 'donations.json')
+};
+
+const LIMITS = {
+    NAME_MAX: 50,
+    MESSAGE_MAX: 200,
+    AMOUNT_MIN: 1,
+    AMOUNT_MAX: 1000000000
 };
 
 // ============================================
@@ -66,6 +89,153 @@ async function sendToRoblox(donation) {
 }
 
 // ============================================
+// DONATION LOG STORE (memori + file)
+// ============================================
+const donationLog = [];
+
+function loadLog() {
+    try {
+        const raw = fs.readFileSync(CONFIG.LOG_FILE, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+            donationLog.push(...parsed.slice(-CONFIG.MAX_LOG));
+            console.log(`[LOG] 📂 Loaded ${donationLog.length} donasi dari ${CONFIG.LOG_FILE}`);
+        }
+    } catch (error) {
+        if (error.code !== 'ENOENT') {
+            console.warn('[LOG] ⚠️ Gagal membaca file log:', error.message);
+        }
+    }
+}
+
+let savePending = false;
+function saveLog() {
+    if (savePending) return;
+    savePending = true;
+    setTimeout(() => {
+        savePending = false;
+        fs.mkdir(path.dirname(CONFIG.LOG_FILE), { recursive: true }, (mkdirErr) => {
+            if (mkdirErr) return console.warn('[LOG] ⚠️ Gagal membuat folder log:', mkdirErr.message);
+            fs.writeFile(CONFIG.LOG_FILE, JSON.stringify(donationLog, null, 2), (writeErr) => {
+                if (writeErr) console.warn('[LOG] ⚠️ Gagal menyimpan log:', writeErr.message);
+            });
+        });
+    }, 500);
+}
+
+function sanitizeText(value, maxLength) {
+    return String(value ?? '')
+        .replace(/[\u0000-\u001F\u007F]/g, ' ')
+        .trim()
+        .slice(0, maxLength);
+}
+
+// Semua donasi (webhook maupun manual) lewat sini agar tercatat & tersiar ke dashboard
+async function processDonation(input) {
+    const donation = {
+        platform: sanitizeText(input.platform || 'unknown', 20).toLowerCase(),
+        donatorName: sanitizeText(input.donatorName, LIMITS.NAME_MAX) || 'Donatur Anonim',
+        amount: Math.floor(Number(input.amount) || 0),
+        message: sanitizeText(input.message, LIMITS.MESSAGE_MAX)
+    };
+
+    const roblox = await sendToRoblox(donation);
+
+    const entry = {
+        id: crypto.randomUUID(),
+        ...donation,
+        source: input.source || 'webhook',
+        status: roblox.success ? 'sent' : 'failed',
+        error: roblox.success ? null : (roblox.error || `HTTP ${roblox.status}`),
+        timestamp: Date.now()
+    };
+
+    donationLog.push(entry);
+    if (donationLog.length > CONFIG.MAX_LOG) {
+        donationLog.splice(0, donationLog.length - CONFIG.MAX_LOG);
+    }
+    saveLog();
+    broadcast('donation', entry);
+
+    return { ...entry, roblox };
+}
+
+// ============================================
+// SERVER-SENT EVENTS (live update dashboard)
+// ============================================
+const sseClients = new Set();
+
+function broadcast(event, data) {
+    const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    for (const client of sseClients) {
+        try {
+            client.write(payload);
+        } catch {
+            sseClients.delete(client);
+        }
+    }
+}
+
+setInterval(() => broadcast('ping', { t: Date.now() }), 25000).unref();
+
+// ============================================
+// AUTENTIKASI DASHBOARD
+// ============================================
+const sessions = new Map();          // token -> expiry (ms)
+const loginAttempts = new Map();     // ip -> { count, resetAt }
+const SESSION_TTL = 12 * 60 * 60 * 1000;
+
+function safeCompare(a, b) {
+    const bufA = Buffer.from(String(a));
+    const bufB = Buffer.from(String(b));
+    if (bufA.length !== bufB.length) return false;
+    return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function createSession() {
+    const token = crypto.randomBytes(32).toString('hex');
+    sessions.set(token, Date.now() + SESSION_TTL);
+    return token;
+}
+
+function isValidSession(token) {
+    if (!token) return false;
+    const expiry = sessions.get(token);
+    if (!expiry) return false;
+    if (expiry < Date.now()) {
+        sessions.delete(token);
+        return false;
+    }
+    return true;
+}
+
+function requireAuth(req, res, next) {
+    const token = req.get('x-auth-token') || req.query.token;
+    if (!isValidSession(token)) {
+        return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+    next();
+}
+
+function checkRateLimit(map, key, max, windowMs) {
+    const now = Date.now();
+    const record = map.get(key);
+    if (!record || record.resetAt < now) {
+        map.set(key, { count: 1, resetAt: now + windowMs });
+        return true;
+    }
+    if (record.count >= max) return false;
+    record.count += 1;
+    return true;
+}
+
+setInterval(() => {
+    const now = Date.now();
+    for (const [token, expiry] of sessions) if (expiry < now) sessions.delete(token);
+    for (const [ip, record] of loginAttempts) if (record.resetAt < now) loginAttempts.delete(ip);
+}, 60000).unref();
+
+// ============================================
 // WEBHOOK: SAWERIA
 // ============================================
 app.post('/webhook/saweria', async (req, res) => {
@@ -97,14 +267,14 @@ app.post('/webhook/saweria', async (req, res) => {
     console.log(`[SAWERIA] Parsed - Name: ${donatorName}, Amount: ${amount}, Message: ${message}`);
     
     if (!isNaN(amount) && amount > 0) {
-        const result = await sendToRoblox({
+        const entry = await processDonation({
             platform: 'saweria',
             donatorName,
             amount: Number(amount),
             message
         });
         
-        res.json({ success: true, platform: 'saweria', roblox: result });
+        res.json({ success: true, platform: 'saweria', roblox: entry.roblox });
     } else {
         console.log('[SAWERIA] ⚠️ Invalid donation data, skipped');
         res.json({ success: false, platform: 'saweria', error: 'Invalid amount' });
@@ -148,14 +318,14 @@ app.post('/webhook/sociabuzz', async (req, res) => {
     console.log(`[SOCIABUZZ] Parsed - Name: ${donatorName}, Amount: ${amount}, Message: ${message}`);
     
     if (!isNaN(amount) && amount > 0) {
-        const result = await sendToRoblox({
+        const entry = await processDonation({
             platform: 'sociabuzz',
             donatorName,
             amount: Number(amount),
             message
         });
         
-        res.json({ success: true, platform: 'sociabuzz', roblox: result });
+        res.json({ success: true, platform: 'sociabuzz', roblox: entry.roblox });
     } else {
         console.log('[SOCIABUZZ] ⚠️ Invalid donation data, skipped');
         res.json({ success: false, platform: 'sociabuzz', error: 'Invalid amount' });
@@ -194,14 +364,14 @@ app.post('/webhook/bagibagi', async (req, res) => {
     console.log(`[BAGIBAGI] Parsed - Name: ${donatorName}, Amount: ${amount}, Message: ${message}`);
     
     if (!isNaN(amount) && amount > 0) {
-        const result = await sendToRoblox({
+        const entry = await processDonation({
             platform: 'bagibagi',
             donatorName,
             amount: Number(amount),
             message
         });
         
-        res.json({ success: true, platform: 'bagibagi', roblox: result });
+        res.json({ success: true, platform: 'bagibagi', roblox: entry.roblox });
     } else {
         console.log('[BAGIBAGI] ⚠️ Invalid donation data, skipped');
         res.json({ success: false, platform: 'bagibagi', error: 'Invalid amount' });
@@ -261,14 +431,14 @@ app.post('/webhook', async (req, res) => {
     console.log(`[UNIVERSAL] Detected: ${platform} - Name: ${donatorName}, Amount: ${amount}, Message: ${message}`);
     
     if (!isNaN(amount) && amount > 0) {
-        const result = await sendToRoblox({
+        const entry = await processDonation({
             platform,
             donatorName: String(donatorName).trim(),
             amount: Number(amount),
             message: String(message)
         });
         
-        res.json({ success: true, platform, roblox: result });
+        res.json({ success: true, platform, roblox: entry.roblox });
     } else {
         console.log('[UNIVERSAL] ⚠️ Invalid donation data, skipped');
         res.json({ success: false, platform, error: 'Invalid amount' });
@@ -283,15 +453,139 @@ app.post('/test', async (req, res) => {
     
     const { donatorName, amount, message, platform } = req.body;
     
-    const result = await sendToRoblox({
+    const entry = await processDonation({
         platform: platform || 'test',
         donatorName: donatorName || 'Test User',
         amount: Number(amount) || 10000,
-        message: message || 'Test donation'
+        message: message || 'Test donation',
+        source: 'test'
     });
     
-    res.json({ success: true, platform: 'test', roblox: result });
+    res.json({ success: true, platform: 'test', roblox: entry.roblox });
 });
+
+// ============================================
+// API DASHBOARD
+// ============================================
+app.post('/api/login', (req, res) => {
+    const ip = req.ip || 'unknown';
+    if (!checkRateLimit(loginAttempts, ip, 10, 5 * 60 * 1000)) {
+        return res.status(429).json({ success: false, error: 'Terlalu banyak percobaan login, coba lagi nanti' });
+    }
+
+    const password = String(req.body?.password ?? '');
+    if (!safeCompare(password, CONFIG.DASHBOARD_PASSWORD)) {
+        console.warn(`[AUTH] ❌ Login gagal dari ${ip}`);
+        return res.status(401).json({ success: false, error: 'Password salah' });
+    }
+
+    const token = createSession();
+    console.log(`[AUTH] ✅ Login berhasil dari ${ip}`);
+    res.json({ success: true, token, expiresIn: SESSION_TTL });
+});
+
+app.post('/api/logout', requireAuth, (req, res) => {
+    sessions.delete(req.get('x-auth-token') || req.query.token);
+    res.json({ success: true });
+});
+
+app.get('/api/session', requireAuth, (req, res) => {
+    res.json({ success: true });
+});
+
+app.get('/api/donations', requireAuth, (req, res) => {
+    const limit = Math.min(Number(req.query.limit) || 100, CONFIG.MAX_LOG);
+    res.json({
+        success: true,
+        total: donationLog.length,
+        donations: donationLog.slice(-limit).reverse()
+    });
+});
+
+app.get('/api/stats', requireAuth, (req, res) => {
+    res.json({ success: true, stats: buildStats() });
+});
+
+app.delete('/api/donations', requireAuth, (req, res) => {
+    donationLog.length = 0;
+    saveLog();
+    broadcast('cleared', { t: Date.now() });
+    res.json({ success: true });
+});
+
+// Manual donate dari dashboard → langsung ke Roblox
+app.post('/api/manual-donate', requireAuth, async (req, res) => {
+    const donatorName = sanitizeText(req.body?.donatorName, LIMITS.NAME_MAX);
+    const message = sanitizeText(req.body?.message, LIMITS.MESSAGE_MAX);
+    const amount = Math.floor(Number(req.body?.amount));
+
+    if (!donatorName) {
+        return res.status(400).json({ success: false, error: 'Username wajib diisi' });
+    }
+    if (!Number.isFinite(amount) || amount < LIMITS.AMOUNT_MIN || amount > LIMITS.AMOUNT_MAX) {
+        return res.status(400).json({
+            success: false,
+            error: `Amount harus angka antara ${LIMITS.AMOUNT_MIN} - ${LIMITS.AMOUNT_MAX}`
+        });
+    }
+
+    console.log(`\n[MANUAL] ========== MANUAL DONATION ==========`);
+    console.log(`[MANUAL] Name: ${donatorName}, Amount: ${amount}, Message: ${message}`);
+
+    const entry = await processDonation({
+        platform: 'manual',
+        donatorName,
+        amount,
+        message,
+        source: 'manual'
+    });
+
+    if (!entry.roblox.success) {
+        return res.status(502).json({ success: false, error: entry.error, donation: entry });
+    }
+
+    res.json({ success: true, donation: entry });
+});
+
+// Live stream log donasi (Server-Sent Events)
+app.get('/api/stream', requireAuth, (req, res) => {
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no'
+    });
+    res.write(`event: connected\ndata: ${JSON.stringify({ t: Date.now() })}\n\n`);
+
+    sseClients.add(res);
+    req.on('close', () => sseClients.delete(res));
+});
+
+function buildStats() {
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    const stats = {
+        totalDonations: donationLog.length,
+        totalAmount: 0,
+        todayAmount: 0,
+        todayCount: 0,
+        failed: 0,
+        byPlatform: {}
+    };
+
+    for (const entry of donationLog) {
+        stats.totalAmount += entry.amount;
+        if (entry.status === 'failed') stats.failed += 1;
+        if (entry.timestamp >= startOfToday.getTime()) {
+            stats.todayAmount += entry.amount;
+            stats.todayCount += 1;
+        }
+        stats.byPlatform[entry.platform] = (stats.byPlatform[entry.platform] || 0) + 1;
+    }
+
+    return stats;
+}
 
 // ============================================
 // STATUS ENDPOINTS
@@ -300,22 +594,30 @@ app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
-        platforms: ['saweria', 'sociabuzz', 'bagibagi'],
-        mode: 'direct-send (no queue)'
+        platforms: ['saweria', 'sociabuzz', 'bagibagi', 'manual'],
+        mode: 'direct-send (no queue)',
+        logged: donationLog.length
     });
 });
 
-app.get('/', (req, res) => {
+app.get('/api/info', (req, res) => {
     res.json({
         name: 'Multi-Platform Donation Server',
-        version: '2.1.0',
-        description: 'Saweria, Sociabuzz, BagiBagi → Roblox MessagingService (Direct Send)',
+        version: '3.0.0',
+        description: 'Saweria, Sociabuzz, BagiBagi & Manual → Roblox MessagingService (Direct Send)',
         endpoints: {
             webhooks: {
                 saweria: 'POST /webhook/saweria',
                 sociabuzz: 'POST /webhook/sociabuzz',
                 bagibagi: 'POST /webhook/bagibagi',
                 universal: 'POST /webhook (auto-detect)'
+            },
+            dashboard: {
+                login: 'POST /api/login',
+                donations: 'GET /api/donations',
+                stats: 'GET /api/stats',
+                manual: 'POST /api/manual-donate',
+                stream: 'GET /api/stream'
             },
             test: 'POST /test',
             health: 'GET /health'
@@ -330,26 +632,34 @@ app.get('/', (req, res) => {
 // ============================================
 // START SERVER
 // ============================================
+loadLog();
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log('');
     console.log('🚀 ===============================================');
-    console.log('🚀 Multi-Platform Donation Server v2.1');
-    console.log('🚀 Mode: Direct Send (No Queue)');
+    console.log('🚀 Multi-Platform Donation Server v3.0');
+    console.log('🚀 Mode: Direct Send + Web Dashboard');
     console.log('🚀 ===============================================');
     console.log(`📡 Server running on port ${PORT}`);
+    console.log(`🖥️  Dashboard: http://localhost:${PORT}`);
     console.log('');
     console.log('📋 Webhook Endpoints:');
     console.log('   • Saweria:    POST /webhook/saweria');
     console.log('   • Sociabuzz:  POST /webhook/sociabuzz');
     console.log('   • BagiBagi:   POST /webhook/bagibagi');
     console.log('   • Universal:  POST /webhook');
-    console.log('   • Test:       POST /test');
+    console.log('   • Manual:     POST /api/manual-donate (butuh login)');
     console.log('');
     console.log('🎮 Roblox MessagingService:');
     console.log(`   • Topic: ${CONFIG.MESSAGING_TOPIC}`);
     console.log(`   • Universe ID: ${CONFIG.UNIVERSE_ID}`);
     console.log('');
+    if (CONFIG.DASHBOARD_PASSWORD === 'admin123') {
+        console.log('⚠️  PERINGATAN: Password dashboard masih default (admin123).');
+        console.log('⚠️  Set environment variable DASHBOARD_PASSWORD sebelum deploy!');
+        console.log('');
+    }
     console.log('✅ Ready to receive donations!');
     console.log('🚀 ===============================================');
 });
