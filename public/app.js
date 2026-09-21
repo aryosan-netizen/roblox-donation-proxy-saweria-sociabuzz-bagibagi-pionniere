@@ -24,7 +24,7 @@ async function api(path, options = {}) {
     });
 
     if (res.status === 401) {
-        logout();
+        logout('Sesi berakhir, silakan login lagi');
         throw new Error('Sesi berakhir, silakan login lagi');
     }
 
@@ -56,9 +56,10 @@ async function boot() {
     }
 }
 
-function showLogin() {
+function showLogin(message = '') {
     el('appView').classList.add('hidden');
     el('loginView').classList.remove('hidden');
+    el('loginError').textContent = message;
     el('loginUsername').focus();
 }
 
@@ -71,14 +72,14 @@ function showApp() {
     connectStream();
 }
 
-function logout() {
+function logout(message = '') {
     if (state.stream) state.stream.close();
     state.stream = null;
     state.token = '';
     state.username = '';
     localStorage.removeItem(TOKEN_KEY);
     setConnection(false);
-    showLogin();
+    showLogin(message);
 }
 
 el('loginForm').addEventListener('submit', async (e) => {

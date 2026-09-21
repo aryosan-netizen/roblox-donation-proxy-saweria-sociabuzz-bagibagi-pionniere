@@ -33,6 +33,9 @@ const CONFIG = {
     // Password akun "admin" bila DASHBOARD_USERS tidak diisi
     DASHBOARD_PASSWORD: process.env.DASHBOARD_PASSWORD || 'admin123',
 
+    // Kunci penanda tangan token login. Set di env agar sesi tetap valid setelah restart
+    SESSION_SECRET: process.env.SESSION_SECRET || '',
+
     // Jumlah maksimum log donasi yang disimpan di memori
     MAX_LOG: Number(process.env.MAX_LOG) || 500,
 
@@ -185,7 +188,7 @@ setInterval(() => broadcast('ping', { t: Date.now() }), 25000).unref();
 // ============================================
 // AUTENTIKASI DASHBOARD (multi-user)
 // ============================================
-const sessions = new Map();          // token -> { username, expiry }
+const revokedTokens = new Map();     // token -> expiry (hasil logout)
 const loginAttempts = new Map();     // ip+username -> { count, resetAt }
 const SESSION_TTL = 12 * 60 * 60 * 1000;
 
@@ -205,6 +208,28 @@ function parseUsers(raw) {
 const USERS = parseUsers(CONFIG.DASHBOARD_USERS);
 if (USERS.size === 0) USERS.set('admin', CONFIG.DASHBOARD_PASSWORD);
 
+// Secret disimpan ke disk bila tidak diset, supaya restart biasa tidak mementalkan user yang sedang login
+function loadSessionSecret() {
+    if (CONFIG.SESSION_SECRET) return CONFIG.SESSION_SECRET;
+
+    const file = path.join(path.dirname(CONFIG.LOG_FILE), 'session-secret');
+    try {
+        const saved = fs.readFileSync(file, 'utf8').trim();
+        if (saved) return saved;
+    } catch { /* belum ada, buat baru di bawah */ }
+
+    const secret = crypto.randomBytes(32).toString('hex');
+    try {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, secret, { mode: 0o600 });
+    } catch (error) {
+        console.warn('[AUTH] ⚠️ Gagal menyimpan session secret:', error.message);
+    }
+    return secret;
+}
+
+const SESSION_SECRET = loadSessionSecret();
+
 function safeCompare(a, b) {
     const bufA = Buffer.from(String(a));
     const bufB = Buffer.from(String(b));
@@ -220,28 +245,43 @@ function verifyUser(username, password) {
     return Boolean(stored) && match;
 }
 
+function signPayload(payload) {
+    return crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
+}
+
 function createSession(username) {
-    const token = crypto.randomBytes(32).toString('hex');
-    sessions.set(token, { username, expiry: Date.now() + SESSION_TTL });
-    return token;
+    const expiry = Date.now() + SESSION_TTL;
+    const payload = `${username}.${expiry}.${crypto.randomBytes(8).toString('hex')}`;
+    return `${Buffer.from(payload).toString('base64url')}.${signPayload(payload)}`;
 }
 
 function getSession(token) {
-    if (!token) return null;
-    const session = sessions.get(token);
-    if (!session) return null;
-    if (session.expiry < Date.now()) {
-        sessions.delete(token);
+    if (typeof token !== 'string' || !token) return null;
+    if (revokedTokens.has(token)) return null;
+
+    const sep = token.lastIndexOf('.');
+    if (sep < 1) return null;
+
+    let payload;
+    try {
+        payload = Buffer.from(token.slice(0, sep), 'base64url').toString('utf8');
+    } catch {
         return null;
     }
-    return session;
+    if (!safeCompare(token.slice(sep + 1), signPayload(payload))) return null;
+
+    const [username, expiry] = payload.split('.');
+    if (!USERS.has(username)) return null;
+    if (!Number(expiry) || Number(expiry) < Date.now()) return null;
+
+    return { username, expiry: Number(expiry) };
 }
 
 function requireAuth(req, res, next) {
     const token = req.get('x-auth-token') || req.query.token;
     const session = getSession(token);
     if (!session) {
-        return res.status(401).json({ success: false, error: 'Unauthorized' });
+        return res.status(401).json({ success: false, error: 'Sesi tidak valid atau sudah berakhir' });
     }
     req.session = session;
     req.sessionToken = token;
@@ -262,7 +302,7 @@ function checkRateLimit(map, key, max, windowMs) {
 
 setInterval(() => {
     const now = Date.now();
-    for (const [token, session] of sessions) if (session.expiry < now) sessions.delete(token);
+    for (const [token, expiry] of revokedTokens) if (expiry < now) revokedTokens.delete(token);
     for (const [key, record] of loginAttempts) if (record.resetAt < now) loginAttempts.delete(key);
 }, 60000).unref();
 
@@ -518,7 +558,7 @@ app.post('/api/login', (req, res) => {
 });
 
 app.post('/api/logout', requireAuth, (req, res) => {
-    sessions.delete(req.sessionToken);
+    revokedTokens.set(req.sessionToken, req.session.expiry);
     console.log(`[AUTH] 👋 Logout: ${req.session.username}`);
     res.json({ success: true });
 });
@@ -708,6 +748,10 @@ app.listen(PORT, () => {
     console.log(`   • Universe ID: ${CONFIG.UNIVERSE_ID}`);
     console.log('');
     console.log(`👥 Akun dashboard (${USERS.size}): ${[...USERS.keys()].join(', ')}`);
+    if (!CONFIG.SESSION_SECRET) {
+        console.log('ℹ️  SESSION_SECRET belum diset, memakai secret dari file data/session-secret.');
+        console.log('ℹ️  Di hosting dengan disk sementara (Railway/Render), set SESSION_SECRET agar sesi tidak putus tiap deploy.');
+    }
     if (!CONFIG.DASHBOARD_USERS) {
         console.log('⚠️  PERINGATAN: Belum ada DASHBOARD_USERS, memakai akun default "admin".');
         console.log('⚠️  Set DASHBOARD_USERS="user1:pass1,user2:pass2" agar tiap orang punya akun sendiri.');
