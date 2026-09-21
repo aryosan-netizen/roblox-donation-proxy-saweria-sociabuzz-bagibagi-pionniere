@@ -5,6 +5,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const ExcelJS = require('exceljs');
 
 const app = express();
 
@@ -40,7 +41,10 @@ const CONFIG = {
     MAX_LOG: Number(process.env.MAX_LOG) || 500,
 
     // Lokasi file penyimpanan log (agar tidak hilang saat restart)
-    LOG_FILE: process.env.LOG_FILE || path.join(__dirname, 'data', 'donations.json')
+    LOG_FILE: process.env.LOG_FILE || path.join(__dirname, 'data', 'donations.json'),
+
+    // Zona waktu untuk pengelompokan tanggal pada export Excel
+    TIMEZONE: process.env.TIMEZONE || 'Asia/Jakarta'
 };
 
 const LIMITS = {
@@ -120,13 +124,37 @@ function saveLog() {
     savePending = true;
     setTimeout(() => {
         savePending = false;
-        fs.mkdir(path.dirname(CONFIG.LOG_FILE), { recursive: true }, (mkdirErr) => {
-            if (mkdirErr) return console.warn('[LOG] ⚠️ Gagal membuat folder log:', mkdirErr.message);
-            fs.writeFile(CONFIG.LOG_FILE, JSON.stringify(donationLog, null, 2), (writeErr) => {
-                if (writeErr) console.warn('[LOG] ⚠️ Gagal menyimpan log:', writeErr.message);
-            });
-        });
+        writeLogSync();
     }, 500);
+}
+
+// Tulis lewat file sementara agar isi lama tidak rusak bila proses mati di tengah penulisan
+function writeLogSync() {
+    try {
+        fs.mkdirSync(path.dirname(CONFIG.LOG_FILE), { recursive: true });
+        const tmp = `${CONFIG.LOG_FILE}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(donationLog, null, 2));
+        fs.renameSync(tmp, CONFIG.LOG_FILE);
+    } catch (error) {
+        console.warn('[LOG] ⚠️ Gagal menyimpan log:', error.message);
+    }
+}
+
+// Pastikan donasi terakhir ikut tersimpan saat server dimatikan/di-deploy ulang
+for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.on(signal, () => {
+        console.log(`\n[LOG] 💾 Menyimpan ${donationLog.length} donasi sebelum keluar (${signal})...`);
+        writeLogSync();
+        process.exit(0);
+    });
+}
+
+function dateKey(timestamp) {
+    return new Date(timestamp).toLocaleDateString('sv-SE', { timeZone: CONFIG.TIMEZONE });
+}
+
+function dateTimeText(timestamp) {
+    return new Date(timestamp).toLocaleString('sv-SE', { timeZone: CONFIG.TIMEZONE });
 }
 
 function sanitizeText(value, maxLength) {
@@ -615,6 +643,61 @@ app.post('/api/manual-donate', requireAuth, async (req, res) => {
     res.json({ success: true, donation: entry });
 });
 
+// Export log ke Excel, satu tab per tanggal
+app.get('/api/export.xlsx', requireAuth, async (req, res) => {
+    const groups = new Map();
+    for (const entry of donationLog) {
+        const day = dateKey(entry.timestamp);
+        if (!groups.has(day)) groups.set(day, []);
+        groups.get(day).push(entry);
+    }
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Lemansion';
+    workbook.created = new Date();
+
+    const days = [...groups.keys()].sort().reverse();
+    if (days.length === 0) days.push(dateKey(Date.now()));
+
+    for (const day of days) {
+        const sheet = workbook.addWorksheet(day);
+        sheet.columns = [
+            { header: 'Waktu', key: 'waktu', width: 20 },
+            { header: 'Platform', key: 'platform', width: 14 },
+            { header: 'Nama Donatur', key: 'nama', width: 26 },
+            { header: 'Nominal (Rp)', key: 'nominal', width: 16, style: { numFmt: '#,##0' } },
+            { header: 'Pesan', key: 'pesan', width: 46 },
+            { header: 'Status', key: 'status', width: 12 },
+            { header: 'Sumber', key: 'sumber', width: 12 },
+            { header: 'Dikirim Oleh', key: 'oleh', width: 16 },
+            { header: 'Keterangan Error', key: 'error', width: 34 }
+        ];
+        sheet.getRow(1).font = { bold: true };
+        sheet.views = [{ state: 'frozen', ySplit: 1 }];
+
+        for (const entry of groups.get(day) || []) {
+            sheet.addRow({
+                waktu: dateTimeText(entry.timestamp),
+                platform: entry.platform,
+                nama: entry.donatorName,
+                nominal: entry.amount,
+                pesan: entry.message,
+                status: entry.status === 'sent' ? 'Terkirim' : 'Gagal',
+                sumber: entry.source,
+                oleh: entry.by || '-',
+                error: entry.error || ''
+            });
+        }
+    }
+
+    console.log(`[EXPORT] 📊 ${req.session.username} mengunduh ${donationLog.length} donasi (${days.length} tab)`);
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="donasi-${dateKey(Date.now())}.xlsx"`);
+    await workbook.xlsx.write(res);
+    res.end();
+});
+
 // Live stream log donasi (Server-Sent Events)
 app.get('/api/stream', requireAuth, (req, res) => {
     res.writeHead(200, {
@@ -700,6 +783,7 @@ app.get('/api/info', (req, res) => {
                 donations: 'GET /api/donations',
                 stats: 'GET /api/stats',
                 manual: 'POST /api/manual-donate',
+                export: 'GET /api/export.xlsx',
                 stream: 'GET /api/stream'
             },
             test: 'POST /test',

@@ -18,7 +18,9 @@ const state = {
     username: '',
     donations: [],
     filter: 'all',
-    stream: null
+    stream: null,
+    live: false,
+    connectedOnce: false
 };
 
 const rupiah = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID');
@@ -95,6 +97,7 @@ function logout(message = '') {
     state.stream = null;
     state.token = '';
     state.username = '';
+    state.connectedOnce = false;
     localStorage.removeItem(TOKEN_KEY);
     setConnection(false);
     showLogin(message);
@@ -134,6 +137,7 @@ el('logoutBtn').addEventListener('click', async () => {
 
 // ---------- LIVE STREAM ----------
 function setConnection(online) {
+    state.live = online;
     const node = el('connStatus');
     node.classList.toggle('online', online);
     node.classList.toggle('offline', !online);
@@ -146,9 +150,19 @@ function connectStream() {
     const stream = new EventSource(`/api/stream?token=${encodeURIComponent(state.token)}`);
     state.stream = stream;
 
-    stream.addEventListener('connected', () => setConnection(true));
+    stream.addEventListener('connected', () => {
+        setConnection(true);
+        // Ambil ulang log agar donasi yang masuk saat koneksi putus tidak terlewat
+        if (state.connectedOnce) {
+            loadDonations();
+            loadStats();
+        }
+        state.connectedOnce = true;
+    });
     stream.addEventListener('donation', (e) => {
         const entry = JSON.parse(e.data);
+        if (state.donations.some((d) => d.id === entry.id)) return;
+
         state.donations.unshift(entry);
         renderLog();
         loadStats();
@@ -170,10 +184,25 @@ function connectStream() {
     };
 }
 
+// Cadangan bila SSE terputus (proxy/hosting kadang memutus koneksi panjang)
+setInterval(() => {
+    if (state.token && !state.live && !document.hidden) {
+        loadDonations();
+        loadStats();
+    }
+}, 30000);
+
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && state.token) {
+        loadDonations();
+        loadStats();
+    }
+});
+
 // ---------- DATA ----------
 async function loadDonations() {
     try {
-        const data = await api('/api/donations?limit=200');
+        const data = await api('/api/donations?limit=500');
         state.donations = data.donations;
         renderLog();
     } catch (err) {
@@ -315,6 +344,33 @@ el('filterPlatform').addEventListener('change', (e) => {
 el('refreshBtn').addEventListener('click', () => {
     loadDonations();
     loadStats();
+});
+
+el('exportBtn').addEventListener('click', async () => {
+    const button = el('exportBtn');
+    button.disabled = true;
+    button.textContent = 'Menyiapkan...';
+
+    try {
+        const res = await fetch('/api/export.xlsx', { headers: { 'x-auth-token': state.token } });
+        if (!res.ok) throw new Error(res.status === 401 ? 'Sesi berakhir, login lagi' : 'Export gagal');
+
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `donasi-${new Date().toISOString().slice(0, 10)}.xlsx`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+        toast('Excel berhasil diunduh');
+    } catch (err) {
+        toast(err.message, true);
+    } finally {
+        button.disabled = false;
+        button.textContent = 'Export Excel';
+    }
 });
 
 el('clearBtn').addEventListener('click', async () => {
