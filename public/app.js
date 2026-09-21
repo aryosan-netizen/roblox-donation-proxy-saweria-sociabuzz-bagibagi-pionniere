@@ -180,6 +180,7 @@ function connectStream() {
         renderLog();
         renderStats();
     });
+    stream.addEventListener('sync', () => loadDonations());
     stream.onerror = () => {
         setConnection(false);
         // EventSource otomatis reconnect; tutup jika token sudah tidak valid

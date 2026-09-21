@@ -233,18 +233,35 @@ function writeFileLog(payload) {
     fs.renameSync(tmp, CONFIG.LOG_FILE);
 }
 
+// Gabungkan isi penyimpanan ke memori tanpa menghilangkan salah satunya
+function mergeIntoLog(remoteEntries) {
+    if (!Array.isArray(remoteEntries) || remoteEntries.length === 0) return 0;
+
+    const byId = new Map();
+    for (const entry of [...remoteEntries, ...donationLog]) {
+        if (entry && entry.id) byId.set(entry.id, entry);
+    }
+
+    const before = donationLog.length;
+    const merged = [...byId.values()].sort(
+        (a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0) || a.timestamp - b.timestamp
+    );
+
+    donationLog.length = 0;
+    donationLog.push(...merged.slice(-CONFIG.MAX_LOG));
+
+    for (const entry of donationLog) {
+        if (Number.isFinite(entry.seq)) seqCounter = Math.max(seqCounter, entry.seq);
+        else entry.seq = ++seqCounter;
+    }
+
+    return donationLog.length - before;
+}
+
 async function loadLog() {
     try {
         const parsed = await withRetry('Baca log', storageRead);
-        if (!Array.isArray(parsed)) return;
-
-        donationLog.push(...parsed.slice(-CONFIG.MAX_LOG));
-
-        // Entri lama belum punya seq; beri nomor urut agar sinkronisasi dashboard tetap jalan
-        for (const entry of donationLog) {
-            if (Number.isFinite(entry.seq)) seqCounter = Math.max(seqCounter, entry.seq);
-            else entry.seq = ++seqCounter;
-        }
+        mergeIntoLog(parsed);
 
         storageState.ready = true;
         storageState.lastError = null;
@@ -269,6 +286,7 @@ function saveLog() {
     }, 800);
 }
 
+// Baca-gabung-tulis: isi penyimpanan tidak pernah tertimpa oleh memori yang lebih sedikit
 async function flushLog() {
     if (flushing) {
         dirty = true;
@@ -280,21 +298,12 @@ async function flushLog() {
         do {
             dirty = false;
 
-            // Jangan menimpa penyimpanan sebelum isinya pernah terbaca dengan sukses
-            if (!storageState.ready) {
-                const remote = await withRetry('Pemulihan baca penyimpanan', storageRead);
-                if (Array.isArray(remote)) {
-                    const known = new Set(donationLog.map((d) => d.id));
-                    const restored = remote.filter((d) => d && d.id && !known.has(d.id));
-                    if (restored.length > 0) {
-                        donationLog.unshift(...restored);
-                        console.log(`[LOG] ♻️ Memulihkan ${restored.length} entri dari penyimpanan`);
-                    }
-                }
-                storageState.ready = true;
-            }
+            const remote = await withRetry('Baca sebelum tulis', storageRead);
+            const restored = mergeIntoLog(remote);
+            if (restored > 0) console.log(`[LOG] ♻️ Menggabungkan ${restored} entri dari penyimpanan`);
 
             await withRetry('Tulis penyimpanan', storageWrite.bind(null, donationLog));
+            storageState.ready = true;
             storageState.saves += 1;
             storageState.lastSavedAt = Date.now();
             storageState.lastError = null;
@@ -306,6 +315,29 @@ async function flushLog() {
         flushing = false;
     }
 }
+
+// Satu-satunya jalur yang boleh mengosongkan penyimpanan
+async function clearLog() {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    donationLog.length = 0;
+    await withRetry('Kosongkan penyimpanan', storageWrite.bind(null, []));
+    storageState.lastSavedAt = Date.now();
+}
+
+// Selaraskan memori dengan penyimpanan; menjaga data tetap utuh bila ada lebih dari satu instance
+setInterval(async () => {
+    try {
+        const added = mergeIntoLog(await storageRead());
+        storageState.ready = true;
+        if (added > 0) {
+            console.log(`[LOG] 🔄 Sinkron dari penyimpanan: +${added} entri`);
+            broadcast('sync', { t: Date.now() });
+        }
+    } catch (error) {
+        storageState.lastError = error.message;
+    }
+}, 60000).unref();
 
 // Pastikan donasi terakhir ikut tersimpan saat server dimatikan/di-deploy ulang
 for (const signal of ['SIGINT', 'SIGTERM']) {
@@ -1066,9 +1098,13 @@ app.get('/api/stats', requireAuth, (req, res) => {
     res.json({ success: true, stats: buildStats() });
 });
 
-app.delete('/api/donations', requireAuth, (req, res) => {
-    donationLog.length = 0;
-    saveLog();
+app.delete('/api/donations', requireAuth, async (req, res) => {
+    try {
+        await clearLog();
+    } catch (error) {
+        return res.status(502).json({ success: false, error: `Gagal mengosongkan penyimpanan: ${error.message}` });
+    }
+
     broadcast('cleared', { t: Date.now() });
     console.log(`[LOG] 🧹 Log dibersihkan oleh ${req.session.username}`);
     res.json({ success: true });
@@ -1230,9 +1266,15 @@ app.get('/health', (req, res) => {
         timestamp: new Date().toISOString(),
         platforms: ['saweria', 'sociabuzz', 'bagibagi', 'manual'],
         mode: 'direct-send (no queue)',
-        storage: STORAGE_DRIVER,
         logged: donationLog.length,
-        lastSeq: seqCounter
+        lastSeq: seqCounter,
+        storage: {
+            driver: storageState.driver,
+            ready: storageState.ready,
+            saves: storageState.saves,
+            lastSavedAt: storageState.lastSavedAt ? new Date(storageState.lastSavedAt).toISOString() : null,
+            lastError: storageState.lastError
+        }
     });
 });
 
