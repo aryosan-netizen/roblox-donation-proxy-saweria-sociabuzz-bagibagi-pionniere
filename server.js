@@ -35,7 +35,7 @@ const CONFIG = {
     DASHBOARD_PASSWORD: process.env.DASHBOARD_PASSWORD || 'admin123',
 
     // Kunci penanda tangan token login. Set di env agar sesi tetap valid setelah restart
-    SESSION_SECRET: process.env.SESSION_SECRET || '',
+    SESSION_SECRET: process.env.SESSION_SECRET || '8f3c1d9a5e7b204c6a1f8d3e9b5c7a2048e6f1b3d9c5a7e2b4f6081d3a5c7e9b',
 
     // Jumlah maksimum log donasi yang disimpan di memori
     MAX_LOG: Number(process.env.MAX_LOG) || 500,
