@@ -12,7 +12,12 @@ const app = express();
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '100kb' }));
 app.use(express.urlencoded({ extended: false, limit: '100kb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+// HTML tidak boleh di-cache agar dashboard selalu memakai versi aset terbaru
+app.use(express.static(path.join(__dirname, 'public'), {
+    setHeaders: (res, filePath) => {
+        if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+    }
+}));
 
 // ============================================
 // KONFIGURASI - SESUAIKAN DENGAN SETTING KAMU
@@ -498,7 +503,21 @@ async function loadUsers() {
         return;
     }
 
-    if (users.length > 0) return;
+    if (users.length > 0) {
+        for (const user of users) {
+            if (!USER_RULES.ROLES.includes(user.role)) user.role = 'staff';
+        }
+
+        // Jaminan agar panel tidak pernah terkunci tanpa admin
+        if (countAdmins() === 0) {
+            users[0].role = 'admin';
+            console.warn(`[AUTH] ⚠️ Tidak ada admin terdaftar, "${users[0].username}" dinaikkan menjadi admin`);
+            saveUsers().catch((err) => console.warn('[AUTH] ⚠️ Gagal menyimpan perubahan peran:', err.message));
+        }
+
+        console.log(`[AUTH] 🔎 Peran akun: ${users.map((u) => `${u.username}=${u.role}`).join(', ')}`);
+        return;
+    }
 
     // Seed pertama kali: ambil dari DASHBOARD_USERS agar tidak terkunci di luar panel
     const seed = [];
@@ -1190,6 +1209,7 @@ function buildStats() {
 // STATUS ENDPOINTS
 // ============================================
 app.get('/dashboard', (req, res) => {
+    res.setHeader('Cache-Control', 'no-cache, must-revalidate');
     res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
 });
 
