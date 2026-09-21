@@ -105,11 +105,11 @@ const donationLog = [];
 let seqCounter = 0;
 
 const STORAGE = {
-    upstashUrl: process.env.UPSTASH_REDIS_REST_URL || '',
-    upstashToken: process.env.UPSTASH_REDIS_REST_TOKEN || '',
+    upstashUrl: process.env.UPSTASH_REDIS_REST_URL || 'https://complete-mosquito-289057.upstash.io',
+    upstashToken: process.env.UPSTASH_REDIS_REST_TOKEN || 'ggAAAAAABGkhAAIgcDHFEAEA8IOO1Cv5WhDh7uHugv9jbPYRUh2KBLtcd-DcEQ',
     upstashKey: process.env.UPSTASH_KEY || 'lemansion:donations',
-    jsonbinKey: process.env.JSONBIN_KEY || '$2a$10$rGEdNs4ob68SQ4yQT5gr9eC5U.P0RBN2EChhyCAUF0TjUzWWaFHFy',
-    jsonbinId: process.env.JSONBIN_BIN_ID || '6ab0f691ffd5d160531ecc7f '
+    jsonbinKey: process.env.JSONBIN_KEY || '',
+    jsonbinId: process.env.JSONBIN_BIN_ID || ''
 };
 
 // Driver ditentukan dari env yang tersedia; file lokal jadi cadangan terakhir
