@@ -43,6 +43,9 @@ const CONFIG = {
     // Lokasi file penyimpanan log (agar tidak hilang saat restart)
     LOG_FILE: process.env.LOG_FILE || path.join(__dirname, 'data', 'donations.json'),
 
+    // Lokasi file daftar akun bila memakai penyimpanan file lokal
+    USERS_FILE: process.env.USERS_FILE || path.join(__dirname, 'data', 'users.json'),
+
     // Zona waktu untuk pengelompokan tanggal pada export Excel
     TIMEZONE: process.env.TIMEZONE || 'Asia/Jakarta'
 };
@@ -104,13 +107,17 @@ async function sendToRoblox(donation) {
 const donationLog = [];
 let seqCounter = 0;
 
+// Nilai di-trim karena spasi/slash ikut tersalin membuat URL & header penyimpanan tidak valid
 const STORAGE = {
-    upstashUrl: process.env.UPSTASH_REDIS_REST_URL || 'https://complete-mosquito-289057.upstash.io',
-    upstashToken: process.env.UPSTASH_REDIS_REST_TOKEN || 'gQAAAAAABGkhAAIgcDFlYTMyOTM0ZTIzYTU0NjI0YjZjZmM3Yzc5YmVkNDZjYQ',
-    upstashKey: process.env.UPSTASH_KEY || 'lemansion:donations',
-    jsonbinKey: process.env.JSONBIN_KEY || '',
-    jsonbinId: process.env.JSONBIN_BIN_ID || ''
+    upstashUrl: (process.env.UPSTASH_REDIS_REST_URL || 'https://complete-mosquito-289057.upstash.io').trim().replace(/\/+$/, ''),
+    upstashToken: (process.env.UPSTASH_REDIS_REST_TOKEN || 'gQAAAAAABGkhAAIgcDFlYTMyOTM0ZTIzYTU0NjI0YjZjZmM3Yzc5YmVkNDZjYQ').trim(),
+    upstashKey: (process.env.UPSTASH_KEY || 'lemansion:donations').trim(),
+    jsonbinKey: (process.env.JSONBIN_KEY || '').trim(),
+    jsonbinId: (process.env.JSONBIN_BIN_ID || '').trim(),
+    jsonbinUsersId: (process.env.JSONBIN_USERS_BIN_ID || '').trim()
 };
+
+const USERS_KEY = (process.env.UPSTASH_USERS_KEY || 'lemansion:users').trim();
 
 // Driver ditentukan dari env yang tersedia; file lokal jadi cadangan terakhir
 const STORAGE_DRIVER =
@@ -319,38 +326,36 @@ function broadcast(event, data) {
 setInterval(() => broadcast('ping', { t: Date.now() }), 25000).unref();
 
 // ============================================
-// AUTENTIKASI DASHBOARD (multi-user)
+// AKUN DASHBOARD (tersimpan di penyimpanan eksternal)
 // ============================================
 const revokedTokens = new Map();     // token -> expiry (hasil logout)
 const loginAttempts = new Map();     // ip+username -> { count, resetAt }
 const SESSION_TTL = 12 * 60 * 60 * 1000;
 
-// "user1:pass1,user2:pass2" -> Map(username -> password)
-function parseUsers(raw) {
-    const users = new Map();
-    for (const pair of String(raw).split(',')) {
-        const sep = pair.indexOf(':');
-        if (sep < 1) continue;
-        const username = pair.slice(0, sep).trim().toLowerCase();
-        const password = pair.slice(sep + 1).trim();
-        if (username && password) users.set(username, password);
-    }
-    return users;
+const USER_RULES = {
+    USERNAME: /^[a-z0-9._-]{3,20}$/,
+    PASSWORD_MIN: 8,
+    ROLES: ['admin', 'staff']
+};
+
+let users = [];                      // { username, role, salt, hash, createdAt, createdBy, lastLoginAt, credVersion }
+let USERS_SEED_WARNING = false;
+
+// Akun darurat dari env; selalu valid dan tidak bisa dihapus lewat panel
+const ROOT_USER = (() => {
+    const raw = (process.env.ROOT_USER || '').trim();
+    const sep = raw.indexOf(':');
+    if (sep < 1) return null;
+
+    const username = raw.slice(0, sep).trim().toLowerCase();
+    const password = raw.slice(sep + 1).trim();
+    return username && password ? { username, password } : null;
+})();
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+    const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
+    return { salt, hash };
 }
-
-const USERS = parseUsers(CONFIG.DASHBOARD_USERS);
-if (USERS.size === 0) USERS.set('admin', CONFIG.DASHBOARD_PASSWORD);
-
-// Tanpa SESSION_SECRET, kunci diturunkan dari konfigurasi agar nilainya sama di setiap restart & instance
-function resolveSessionSecret() {
-    if (CONFIG.SESSION_SECRET) return CONFIG.SESSION_SECRET;
-
-    return crypto.createHash('sha256')
-        .update(`${CONFIG.DASHBOARD_USERS}|${CONFIG.DASHBOARD_PASSWORD}|${CONFIG.ROBLOX_API_KEY}|${CONFIG.UNIVERSE_ID}`)
-        .digest('hex');
-}
-
-const SESSION_SECRET = resolveSessionSecret();
 
 function safeCompare(a, b) {
     const bufA = Buffer.from(String(a));
@@ -359,21 +364,151 @@ function safeCompare(a, b) {
     return crypto.timingSafeEqual(bufA, bufB);
 }
 
-function verifyUser(username, password) {
-    const stored = USERS.get(username);
-    // Selalu bandingkan agar waktu respons tidak membocorkan username yang valid
-    const expected = stored ?? crypto.randomBytes(24).toString('hex');
-    const match = safeCompare(password, expected);
-    return Boolean(stored) && match;
+function findUser(username) {
+    return users.find((u) => u.username === username) || null;
+}
+
+function publicUser(user) {
+    return {
+        username: user.username,
+        role: user.role,
+        createdAt: user.createdAt || null,
+        createdBy: user.createdBy || null,
+        lastLoginAt: user.lastLoginAt || null,
+        root: Boolean(ROOT_USER && ROOT_USER.username === user.username)
+    };
+}
+
+async function readUsersFromStorage() {
+    if (STORAGE_DRIVER === 'upstash') {
+        const result = await upstashCommand(['GET', USERS_KEY]);
+        return result ? JSON.parse(result) : [];
+    }
+
+    if (STORAGE_DRIVER === 'jsonbin') {
+        if (!STORAGE.jsonbinUsersId) return [];
+        const res = await fetch(`https://api.jsonbin.io/v3/b/${STORAGE.jsonbinUsersId}/latest`, {
+            headers: { 'X-Master-Key': STORAGE.jsonbinKey, 'X-Bin-Meta': 'false' }
+        });
+        const text = await res.text();
+        if (!res.ok) throw new Error(`JSONBin users GET HTTP ${res.status}: ${text.slice(0, 200)}`);
+
+        const data = JSON.parse(text);
+        return Array.isArray(data) ? data : (Array.isArray(data.record) ? data.record : []);
+    }
+
+    try {
+        return JSON.parse(fs.readFileSync(CONFIG.USERS_FILE, 'utf8'));
+    } catch (error) {
+        if (error.code === 'ENOENT') return [];
+        throw error;
+    }
+}
+
+async function writeUsersToStorage() {
+    const payload = JSON.stringify(users);
+
+    if (STORAGE_DRIVER === 'upstash') {
+        await upstashCommand(['SET', USERS_KEY, payload]);
+        return;
+    }
+
+    if (STORAGE_DRIVER === 'jsonbin') {
+        if (!STORAGE.jsonbinUsersId) throw new Error('JSONBIN_USERS_BIN_ID belum diisi');
+        const res = await fetch(`https://api.jsonbin.io/v3/b/${STORAGE.jsonbinUsersId}`, {
+            method: 'PUT',
+            headers: { 'X-Master-Key': STORAGE.jsonbinKey, 'Content-Type': 'application/json' },
+            body: payload
+        });
+        if (!res.ok) throw new Error(`JSONBin users PUT HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+        return;
+    }
+
+    fs.mkdirSync(path.dirname(CONFIG.USERS_FILE), { recursive: true });
+    const tmp = `${CONFIG.USERS_FILE}.tmp`;
+    fs.writeFileSync(tmp, payload);
+    fs.renameSync(tmp, CONFIG.USERS_FILE);
+}
+
+async function saveUsers() {
+    await withRetry('Tulis akun', writeUsersToStorage);
+}
+
+async function loadUsers() {
+    try {
+        const stored = await withRetry('Baca akun', readUsersFromStorage);
+        users = Array.isArray(stored) ? stored.filter((u) => u && u.username && u.hash && u.salt) : [];
+        console.log(`[AUTH] 👥 Memuat ${users.length} akun dari penyimpanan "${STORAGE_DRIVER}"`);
+    } catch (error) {
+        console.error('[AUTH] ❌ GAGAL membaca daftar akun:', error.message);
+        users = [];
+        return;
+    }
+
+    if (users.length > 0) return;
+
+    // Seed pertama kali: ambil dari DASHBOARD_USERS agar tidak terkunci di luar panel
+    const seed = [];
+    for (const pair of String(CONFIG.DASHBOARD_USERS).split(',')) {
+        const sep = pair.indexOf(':');
+        if (sep < 1) continue;
+        const username = pair.slice(0, sep).trim().toLowerCase();
+        const password = pair.slice(sep + 1).trim();
+        if (username && password) seed.push({ username, password });
+    }
+    if (seed.length === 0) seed.push({ username: 'admin', password: CONFIG.DASHBOARD_PASSWORD });
+    USERS_SEED_WARNING = seed.some(({ password }) => password === 'admin123' || password.length < USER_RULES.PASSWORD_MIN);
+
+    users = seed.map(({ username, password }) => ({
+        username,
+        role: 'admin',
+        ...hashPassword(password),
+        createdAt: Date.now(),
+        createdBy: 'seed',
+        lastLoginAt: null,
+        credVersion: 1
+    }));
+
+    try {
+        await saveUsers();
+        console.log(`[AUTH] 🌱 Membuat ${users.length} akun awal: ${users.map((u) => u.username).join(', ')}`);
+    } catch (error) {
+        console.error('[AUTH] ❌ Gagal menyimpan akun awal:', error.message);
+    }
+}
+
+// Kunci sesi tidak lagi bergantung daftar akun, agar menambah/menghapus user tidak mengeluarkan semua orang
+function resolveSessionSecret() {
+    if (CONFIG.SESSION_SECRET) return CONFIG.SESSION_SECRET;
+
+    return crypto.createHash('sha256')
+        .update(`${CONFIG.ROBLOX_API_KEY}|${CONFIG.UNIVERSE_ID}|lemansion-session`)
+        .digest('hex');
+}
+
+const SESSION_SECRET = resolveSessionSecret();
+
+function verifyCredentials(username, password) {
+    if (ROOT_USER && username === ROOT_USER.username && safeCompare(password, ROOT_USER.password)) {
+        return { username: ROOT_USER.username, role: 'admin', credVersion: 0, root: true };
+    }
+
+    const user = findUser(username);
+    // Tetap lakukan hashing walau user tidak ada, agar lama respons tidak membocorkan username valid
+    const salt = user ? user.salt : 'dummy-salt';
+    const { hash } = hashPassword(password, salt);
+    if (!user || !safeCompare(hash, user.hash)) return null;
+
+    return user;
 }
 
 function signPayload(payload) {
     return crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
 }
 
-function createSession(username) {
+function createSession(user) {
     const expiry = Date.now() + SESSION_TTL;
-    const payload = `${username}.${expiry}.${crypto.randomBytes(8).toString('hex')}`;
+    const payload = `${user.username}.${expiry}.${user.credVersion || 1}.${crypto.randomBytes(8).toString('hex')}`;
     return `${Buffer.from(payload).toString('base64url')}.${signPayload(payload)}`;
 }
 
@@ -391,14 +526,23 @@ function readSession(token) {
         return { error: 'payload token rusak' };
     }
     if (!safeCompare(token.slice(sep + 1), signPayload(payload))) {
-        return { error: 'signature tidak cocok (SESSION_SECRET / konfigurasi akun berubah?)' };
+        return { error: 'signature tidak cocok (SESSION_SECRET berubah?)' };
     }
 
-    const [username, expiry] = payload.split('.');
-    if (!USERS.has(username)) return { error: `user "${username}" tidak terdaftar lagi` };
+    const [username, expiry, credVersion] = payload.split('.');
     if (!Number(expiry) || Number(expiry) < Date.now()) return { error: 'token kedaluwarsa' };
 
-    return { session: { username, expiry: Number(expiry) } };
+    if (ROOT_USER && username === ROOT_USER.username) {
+        return { session: { username, role: 'admin', expiry: Number(expiry) } };
+    }
+
+    const user = findUser(username);
+    if (!user) return { error: `akun "${username}" sudah dihapus` };
+    if (Number(credVersion || 1) !== (user.credVersion || 1)) {
+        return { error: 'password akun diubah, sesi lama tidak berlaku' };
+    }
+
+    return { session: { username, role: user.role, expiry: Number(expiry) } };
 }
 
 function requireAuth(req, res, next) {
@@ -410,6 +554,13 @@ function requireAuth(req, res, next) {
     }
     req.session = session;
     req.sessionToken = token;
+    next();
+}
+
+function requireAdmin(req, res, next) {
+    if (req.session.role !== 'admin') {
+        return res.status(403).json({ success: false, error: 'Hanya admin yang boleh mengelola akun' });
+    }
     next();
 }
 
@@ -663,7 +814,7 @@ app.post('/test', async (req, res) => {
 // ============================================
 // API DASHBOARD
 // ============================================
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
     const ip = req.ip || 'unknown';
     const username = sanitizeText(req.body?.username, 32).toLowerCase();
     const password = String(req.body?.password ?? '');
@@ -672,14 +823,20 @@ app.post('/api/login', (req, res) => {
         return res.status(429).json({ success: false, error: 'Terlalu banyak percobaan login, coba lagi nanti' });
     }
 
-    if (!username || !verifyUser(username, password)) {
+    const user = username ? verifyCredentials(username, password) : null;
+    if (!user) {
         console.warn(`[AUTH] ❌ Login gagal (${username || '-'}) dari ${ip}`);
         return res.status(401).json({ success: false, error: 'Username atau password salah' });
     }
 
-    const token = createSession(username);
-    console.log(`[AUTH] ✅ Login berhasil: ${username} dari ${ip}`);
-    res.json({ success: true, token, username, expiresIn: SESSION_TTL });
+    if (!user.root) {
+        user.lastLoginAt = Date.now();
+        saveUsers().catch((err) => console.warn('[AUTH] ⚠️ Gagal menyimpan waktu login:', err.message));
+    }
+
+    const token = createSession(user);
+    console.log(`[AUTH] ✅ Login berhasil: ${username} (${user.role}) dari ${ip}`);
+    res.json({ success: true, token, username, role: user.role, expiresIn: SESSION_TTL });
 });
 
 app.post('/api/logout', requireAuth, (req, res) => {
@@ -689,8 +846,139 @@ app.post('/api/logout', requireAuth, (req, res) => {
 });
 
 app.get('/api/session', requireAuth, (req, res) => {
-    res.json({ success: true, username: req.session.username });
+    res.json({ success: true, username: req.session.username, role: req.session.role });
 });
+
+// ============================================
+// API KELOLA AKUN (khusus admin)
+// ============================================
+app.get('/api/users', requireAuth, requireAdmin, (req, res) => {
+    const list = users.map(publicUser);
+    if (ROOT_USER && !findUser(ROOT_USER.username)) {
+        list.push({
+            username: ROOT_USER.username,
+            role: 'admin',
+            createdAt: null,
+            createdBy: 'env',
+            lastLoginAt: null,
+            root: true
+        });
+    }
+    res.json({ success: true, users: list, currentUser: req.session.username });
+});
+
+app.post('/api/users', requireAuth, requireAdmin, async (req, res) => {
+    const username = sanitizeText(req.body?.username, 20).toLowerCase();
+    const password = String(req.body?.password ?? '');
+    const role = USER_RULES.ROLES.includes(req.body?.role) ? req.body.role : 'staff';
+
+    if (!USER_RULES.USERNAME.test(username)) {
+        return res.status(400).json({
+            success: false,
+            error: 'Username 3-20 karakter, hanya huruf kecil, angka, titik, garis bawah, atau strip'
+        });
+    }
+    if (password.length < USER_RULES.PASSWORD_MIN) {
+        return res.status(400).json({ success: false, error: `Password minimal ${USER_RULES.PASSWORD_MIN} karakter` });
+    }
+    if (findUser(username) || (ROOT_USER && ROOT_USER.username === username)) {
+        return res.status(409).json({ success: false, error: 'Username sudah dipakai' });
+    }
+
+    const user = {
+        username,
+        role,
+        ...hashPassword(password),
+        createdAt: Date.now(),
+        createdBy: req.session.username,
+        lastLoginAt: null,
+        credVersion: 1
+    };
+    users.push(user);
+
+    try {
+        await saveUsers();
+    } catch (error) {
+        users = users.filter((u) => u.username !== username);
+        return res.status(502).json({ success: false, error: `Gagal menyimpan akun: ${error.message}` });
+    }
+
+    console.log(`[AUTH] ➕ Akun "${username}" (${role}) dibuat oleh ${req.session.username}`);
+    res.json({ success: true, user: publicUser(user) });
+});
+
+app.patch('/api/users/:username', requireAuth, requireAdmin, async (req, res) => {
+    const username = sanitizeText(req.params.username, 20).toLowerCase();
+    const user = findUser(username);
+    if (!user) return res.status(404).json({ success: false, error: 'Akun tidak ditemukan' });
+
+    const password = req.body?.password === undefined ? null : String(req.body.password);
+    const role = req.body?.role === undefined ? null : String(req.body.role);
+    const snapshot = { ...user };
+
+    if (password !== null) {
+        if (password.length < USER_RULES.PASSWORD_MIN) {
+            return res.status(400).json({ success: false, error: `Password minimal ${USER_RULES.PASSWORD_MIN} karakter` });
+        }
+        Object.assign(user, hashPassword(password));
+        user.credVersion = (user.credVersion || 1) + 1;
+    }
+
+    if (role !== null) {
+        if (!USER_RULES.ROLES.includes(role)) {
+            return res.status(400).json({ success: false, error: 'Peran tidak dikenal' });
+        }
+        if (user.role === 'admin' && role !== 'admin' && countAdmins() <= 1) {
+            return res.status(400).json({ success: false, error: 'Tidak boleh menurunkan peran admin terakhir' });
+        }
+        user.role = role;
+    }
+
+    try {
+        await saveUsers();
+    } catch (error) {
+        Object.assign(user, snapshot);
+        return res.status(502).json({ success: false, error: `Gagal menyimpan perubahan: ${error.message}` });
+    }
+
+    console.log(`[AUTH] ✏️ Akun "${username}" diubah oleh ${req.session.username}` +
+        `${password !== null ? ' (password direset)' : ''}${role !== null ? ` (peran: ${role})` : ''}`);
+    res.json({ success: true, user: publicUser(user) });
+});
+
+app.delete('/api/users/:username', requireAuth, requireAdmin, async (req, res) => {
+    const username = sanitizeText(req.params.username, 20).toLowerCase();
+
+    if (username === req.session.username) {
+        return res.status(400).json({ success: false, error: 'Tidak bisa menghapus akun sendiri' });
+    }
+    if (ROOT_USER && ROOT_USER.username === username) {
+        return res.status(400).json({ success: false, error: 'Akun darurat tidak bisa dihapus dari panel' });
+    }
+
+    const user = findUser(username);
+    if (!user) return res.status(404).json({ success: false, error: 'Akun tidak ditemukan' });
+    if (user.role === 'admin' && countAdmins() <= 1) {
+        return res.status(400).json({ success: false, error: 'Tidak boleh menghapus admin terakhir' });
+    }
+
+    const backup = [...users];
+    users = users.filter((u) => u.username !== username);
+
+    try {
+        await saveUsers();
+    } catch (error) {
+        users = backup;
+        return res.status(502).json({ success: false, error: `Gagal menghapus akun: ${error.message}` });
+    }
+
+    console.log(`[AUTH] 🗑️ Akun "${username}" dihapus oleh ${req.session.username}`);
+    res.json({ success: true });
+});
+
+function countAdmins() {
+    return users.filter((u) => u.role === 'admin').length;
+}
 
 app.get('/api/donations', requireAuth, (req, res) => {
     const limit = Math.min(Number(req.query.limit) || 100, CONFIG.MAX_LOG);
@@ -911,12 +1199,17 @@ app.get('/api/info', (req, res) => {
 const PORT = process.env.PORT || 3000;
 
 const STORAGE_LABEL = {
-    upstash: 'Upstash Redis (persisten)',
-    jsonbin: 'JSONBin.io (persisten)',
+    upstash: `Upstash Redis (persisten) — key ${STORAGE.upstashKey}`,
+    jsonbin: `JSONBin.io (persisten) — bin ${STORAGE.jsonbinId}`,
     file: `File lokal — ${CONFIG.LOG_FILE}`
 };
 
-loadLog().then(() => {
+async function bootstrap() {
+    await loadLog();
+    await loadUsers();
+}
+
+bootstrap().then(() => {
     app.listen(PORT, () => {
         console.log('');
         console.log('🚀 ===============================================');
@@ -939,23 +1232,24 @@ loadLog().then(() => {
         console.log(`   • Universe ID: ${CONFIG.UNIVERSE_ID}`);
         console.log('');
         console.log(`💾 Penyimpanan log: ${STORAGE_LABEL[STORAGE_DRIVER]}`);
+        console.log(`   • Status: ${storageState.ready ? `OK (${donationLog.length} entri)` : 'GAGAL — ' + storageState.lastError}`);
         if (STORAGE_DRIVER === 'file') {
             console.log('⚠️  File lokal HILANG setiap deploy ulang di Railway/Render.');
             console.log('⚠️  Pakai volume persisten (set LOG_FILE ke path volume) atau isi');
             console.log('⚠️  UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN agar data aman.');
         }
         console.log('');
-        console.log(`👥 Akun dashboard (${USERS.size}): ${[...USERS.keys()].join(', ')}`);
+        console.log(`👥 Akun dashboard (${users.length}): ${users.map((u) => `${u.username}[${u.role}]`).join(', ') || '-'}`);
+        if (ROOT_USER) {
+            console.log(`🔑 Akun darurat aktif: ${ROOT_USER.username} (dari env ROOT_USER, tidak bisa dihapus)`);
+        } else {
+            console.log('ℹ️  Set ROOT_USER="nama:password" sebagai akun cadangan agar tidak terkunci dari panel.');
+        }
         if (!CONFIG.SESSION_SECRET) {
-            console.log('ℹ️  SESSION_SECRET belum diset, kunci sesi diturunkan dari konfigurasi akun.');
-            console.log('ℹ️  Catatan: mengubah akun/password akan otomatis mengakhiri sesi yang sedang berjalan.');
+            console.log('ℹ️  SESSION_SECRET belum diset, kunci sesi diturunkan dari API key & Universe ID.');
         }
-        if (!CONFIG.DASHBOARD_USERS) {
-            console.log('⚠️  PERINGATAN: Belum ada DASHBOARD_USERS, memakai akun default "admin".');
-            console.log('⚠️  Set DASHBOARD_USERS="user1:pass1,user2:pass2" agar tiap orang punya akun sendiri.');
-        }
-        if (USERS.get('admin') === 'admin123') {
-            console.log('⚠️  PERINGATAN: Password masih default (admin123). Ganti sebelum deploy!');
+        if (USERS_SEED_WARNING) {
+            console.log('⚠️  PERINGATAN: Akun awal memakai password default. Segera ganti lewat menu Kelola Akun!');
         }
         console.log('');
         console.log('✅ Ready to receive donations!');

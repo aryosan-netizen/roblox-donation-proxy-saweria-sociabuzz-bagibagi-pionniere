@@ -16,6 +16,7 @@ function readStoredToken() {
 const state = {
     token: readStoredToken(),
     username: '',
+    role: 'staff',
     donations: [],
     filter: 'all',
     stream: null,
@@ -70,6 +71,7 @@ async function boot() {
     try {
         const data = await api('/api/session');
         state.username = data.username;
+        state.role = data.role || 'staff';
         showApp();
     } catch {
         if (state.token === tokenUsed) showLogin();
@@ -86,7 +88,9 @@ function showLogin(message = '') {
 function showApp() {
     el('loginView').classList.add('hidden');
     el('appView').classList.remove('hidden');
-    el('currentUser').textContent = state.username ? `@${state.username}` : '';
+    el('currentUser').textContent = state.username ? `@${state.username} · ${state.role}` : '';
+    el('tabBtnUsers').classList.toggle('hidden', state.role !== 'admin');
+    if (state.role !== 'admin' && localStorage.getItem(TAB_KEY) === 'users') showTab('log');
     loadDonations();
     connectStream();
 }
@@ -96,6 +100,7 @@ function logout(message = '') {
     state.stream = null;
     state.token = '';
     state.username = '';
+    state.role = 'staff';
     state.connectedOnce = false;
     localStorage.removeItem(TOKEN_KEY);
     setConnection(false);
@@ -121,6 +126,7 @@ el('loginForm').addEventListener('submit', async (e) => {
 
         state.token = data.token;
         state.username = data.username;
+        state.role = data.role || 'staff';
         localStorage.setItem(TOKEN_KEY, data.token);
         el('loginPassword').value = '';
         showApp();
@@ -196,7 +202,9 @@ document.addEventListener('visibilitychange', () => {
 const TAB_KEY = 'donation_dashboard_tab';
 
 function showTab(name, focusInput = false) {
-    const active = name === 'log' ? 'log' : 'manual';
+    const allowed = ['manual', 'log', 'users'];
+    let active = allowed.includes(name) ? name : 'manual';
+    if (active === 'users' && state.role !== 'admin') active = 'log';
     localStorage.setItem(TAB_KEY, active);
 
     document.querySelectorAll('.tab-btn').forEach((btn) => {
@@ -204,9 +212,11 @@ function showTab(name, focusInput = false) {
     });
     el('tabManual').classList.toggle('hidden', active !== 'manual');
     el('tabLog').classList.toggle('hidden', active !== 'log');
+    el('tabUsers').classList.toggle('hidden', active !== 'users');
 
     if (active === 'manual' && focusInput) el('mName').focus();
     if (active === 'log' && state.token) loadDonations();
+    if (active === 'users' && state.token) loadUsers();
 }
 
 document.querySelectorAll('.tab-btn').forEach((btn) => {
@@ -437,6 +447,142 @@ el('clearBtn').addEventListener('click', async () => {
         toast(err.message, true);
     }
 });
+
+// ---------- KELOLA AKUN ----------
+async function loadUsers() {
+    try {
+        const data = await api('/api/users');
+        renderUsers(data.users);
+    } catch (err) {
+        toast(err.message, true);
+    }
+}
+
+function renderUsers(list) {
+    const body = el('userTableBody');
+    body.textContent = '';
+
+    if (!list || list.length === 0) {
+        const row = body.insertRow();
+        const cell = row.insertCell();
+        cell.colSpan = 5;
+        cell.className = 'empty';
+        cell.textContent = 'Belum ada akun.';
+        return;
+    }
+
+    for (const user of list) {
+        const row = body.insertRow();
+
+        const nameCell = row.insertCell();
+        nameCell.textContent = user.username;
+        if (user.username === state.username) nameCell.textContent += ' (kamu)';
+        if (user.root) nameCell.textContent += ' 🔑';
+
+        const roleCell = row.insertCell();
+        const roleBadge = document.createElement('span');
+        roleBadge.className = `badge ${user.role}`;
+        roleBadge.textContent = user.role;
+        roleCell.appendChild(roleBadge);
+
+        row.insertCell().textContent = user.createdAt
+            ? `${timeText(user.createdAt)}${user.createdBy ? ` oleh ${user.createdBy}` : ''}`
+            : (user.createdBy || '-');
+        row.insertCell().textContent = user.lastLoginAt ? timeText(user.lastLoginAt) : 'Belum pernah';
+
+        const actionCell = row.insertCell();
+        actionCell.className = 'row-actions';
+
+        if (user.root) {
+            actionCell.textContent = 'Akun darurat (env)';
+            continue;
+        }
+
+        const resetBtn = document.createElement('button');
+        resetBtn.className = 'btn ghost';
+        resetBtn.textContent = 'Reset Password';
+        resetBtn.addEventListener('click', () => resetPassword(user.username));
+        actionCell.appendChild(resetBtn);
+
+        const roleBtn = document.createElement('button');
+        roleBtn.className = 'btn ghost';
+        roleBtn.textContent = user.role === 'admin' ? 'Jadikan Staff' : 'Jadikan Admin';
+        roleBtn.addEventListener('click', () => {
+            updateUser(user.username, { role: user.role === 'admin' ? 'staff' : 'admin' }, 'Peran diperbarui');
+        });
+        actionCell.appendChild(roleBtn);
+
+        if (user.username !== state.username) {
+            const delBtn = document.createElement('button');
+            delBtn.className = 'btn danger';
+            delBtn.textContent = 'Hapus';
+            delBtn.addEventListener('click', () => deleteUser(user.username));
+            actionCell.appendChild(delBtn);
+        }
+    }
+}
+
+async function updateUser(username, payload, successMessage) {
+    try {
+        await api(`/api/users/${encodeURIComponent(username)}`, {
+            method: 'PATCH',
+            body: JSON.stringify(payload)
+        });
+        toast(successMessage);
+        loadUsers();
+    } catch (err) {
+        toast(err.message, true);
+    }
+}
+
+function resetPassword(username) {
+    const password = prompt(`Password baru untuk "${username}" (minimal 8 karakter):`);
+    if (password === null) return;
+    if (password.length < 8) return toast('Password minimal 8 karakter', true);
+
+    updateUser(username, { password }, `Password "${username}" direset`);
+}
+
+async function deleteUser(username) {
+    if (!confirm(`Hapus akun "${username}"? Sesi aktif miliknya langsung berakhir.`)) return;
+
+    try {
+        await api(`/api/users/${encodeURIComponent(username)}`, { method: 'DELETE' });
+        toast(`Akun "${username}" dihapus`);
+        loadUsers();
+    } catch (err) {
+        toast(err.message, true);
+    }
+}
+
+el('userForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const button = el('userSubmit');
+    button.disabled = true;
+    button.textContent = 'Membuat...';
+
+    try {
+        await api('/api/users', {
+            method: 'POST',
+            body: JSON.stringify({
+                username: el('uName').value,
+                password: el('uPassword').value,
+                role: el('uRole').value
+            })
+        });
+        toast(`Akun "${el('uName').value.toLowerCase()}" dibuat`);
+        el('uName').value = '';
+        el('uPassword').value = '';
+        loadUsers();
+    } catch (err) {
+        toast(err.message, true);
+    } finally {
+        button.disabled = false;
+        button.textContent = 'Buat Akun';
+    }
+});
+
+el('refreshUsersBtn').addEventListener('click', loadUsers);
 
 showTab(localStorage.getItem(TAB_KEY) || 'log');
 boot();

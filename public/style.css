@@ -225,6 +225,49 @@ select { width: auto; padding: 8px 10px; font-size: 13px; }
 .tab-panel { animation: slideIn .2s ease; }
 .manual-form { max-width: 460px; }
 
+/* ---------- KELOLA AKUN ---------- */
+.user-form { max-width: 100%; }
+.user-form-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 14px;
+}
+.user-form-row label { display: block; margin-bottom: 4px; }
+.block-select { width: 100%; padding: 11px 12px; font-size: 14px; }
+.user-form .btn { margin-top: 16px; align-self: flex-start; }
+
+.table-wrap { overflow-x: auto; }
+
+.user-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    min-width: 640px;
+}
+.user-table th {
+    text-align: left;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--muted);
+    font-weight: 600;
+    padding: 0 12px 10px;
+    border-bottom: 1px solid var(--border);
+}
+.user-table td {
+    padding: 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+}
+.user-table tr:last-child td { border-bottom: none; }
+.user-table td.empty { text-align: center; color: var(--muted); }
+
+.row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.row-actions .btn { padding: 6px 10px; font-size: 12px; }
+
+.badge.admin { background: #ffffff; color: #000000; }
+.badge.staff { background: transparent; color: #ffffff; border: 1px solid #4a4a4a; }
+
 /* ---------- CONTENT ---------- */
 .content { padding: 24px; width: 100%; }
 

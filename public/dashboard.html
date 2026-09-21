@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="robots" content="noindex, nofollow">
     <title>Dashboard Donasi — Lemansion</title>
-    <link rel="stylesheet" href="/style.css?v=8">
+    <link rel="stylesheet" href="/style.css?v=9">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏛️</text></svg>">
 </head>
 <body>
@@ -53,6 +53,10 @@
                     <span class="tab-icon">≡</span>
                     <span>Log Donate</span>
                     <span id="logCount" class="tab-count">0</span>
+                </button>
+                <button class="tab-btn hidden" data-tab="users" id="tabBtnUsers">
+                    <span class="tab-icon">☉</span>
+                    <span>Kelola Akun</span>
                 </button>
             </nav>
         </aside>
@@ -131,12 +135,63 @@
                     </div>
                 </div>
             </div>
+
+            <!-- TAB: KELOLA AKUN -->
+            <div id="tabUsers" class="tab-panel hidden">
+                <div class="panel">
+                    <div class="panel-head">
+                        <h2>Tambah Akun</h2>
+                        <span class="muted small">Password disimpan dalam bentuk hash</span>
+                    </div>
+                    <form id="userForm" class="form user-form" autocomplete="off">
+                        <div class="user-form-row">
+                            <div>
+                                <label for="uName">Username</label>
+                                <input type="text" id="uName" maxlength="20" placeholder="contoh: staff01" required>
+                            </div>
+                            <div>
+                                <label for="uPassword">Password</label>
+                                <input type="password" id="uPassword" minlength="8" placeholder="minimal 8 karakter" required>
+                            </div>
+                            <div>
+                                <label for="uRole">Peran</label>
+                                <select id="uRole" class="block-select">
+                                    <option value="staff">Staff — log &amp; manual donate</option>
+                                    <option value="admin">Admin — penuh + kelola akun</option>
+                                </select>
+                            </div>
+                        </div>
+                        <button type="submit" id="userSubmit" class="btn primary">Buat Akun</button>
+                    </form>
+                </div>
+
+                <div class="panel" style="margin-top:16px">
+                    <div class="panel-head">
+                        <h2>Daftar Akun</h2>
+                        <button id="refreshUsersBtn" class="btn ghost">Refresh</button>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="user-table">
+                            <thead>
+                                <tr>
+                                    <th>Username</th>
+                                    <th>Peran</th>
+                                    <th>Dibuat</th>
+                                    <th>Login Terakhir</th>
+                                    <th>Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody id="userTableBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
         </main>
     </div>
 </section>
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="/app.js?v=8"></script>
+<script src="/app.js?v=9"></script>
 </body>
 </html>
