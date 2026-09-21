@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="robots" content="noindex, nofollow">
+    <title>Dashboard Donasi — Lemansion</title>
+    <link rel="stylesheet" href="/style.css?v=9">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏛️</text></svg>">
+</head>
+<body>
+
+<!-- LOGIN -->
+<section id="loginView" class="login-view hidden">
+    <form id="loginForm" class="login-card" autocomplete="off">
+        <div class="login-logo">LEMANSION</div>
+        <h1>Dashboard Donasi</h1>
+        <p class="muted">Masuk dengan akun kamu untuk melihat log &amp; kirim donasi manual</p>
+        <input type="text" id="loginUsername" placeholder="Username" autocomplete="username" required>
+        <input type="password" id="loginPassword" placeholder="Password" autocomplete="current-password" required>
+        <button type="submit" class="btn primary block">Masuk</button>
+        <p id="loginError" class="error-text"></p>
+        <a href="/" class="back-link">← Kembali ke lobby</a>
+    </form>
+</section>
+
+<!-- DASHBOARD -->
+<section id="appView" class="app-view hidden">
+    <header class="topbar">
+        <div class="brand">
+            <a href="/" class="brand-icon" title="Kembali ke lobby">LM</a>
+            <div>
+                <h1>Dashboard Donasi</h1>
+                <span class="muted small">Saweria · Sociabuzz · BagiBagi · Manual → Roblox</span>
+            </div>
+        </div>
+        <div class="topbar-right">
+            <span id="connStatus" class="status offline"><i></i> Offline</span>
+            <span id="currentUser" class="user-chip"></span>
+            <button id="logoutBtn" class="btn ghost">Keluar</button>
+        </div>
+    </header>
+
+    <div class="layout">
+        <aside class="sidebar">
+            <span class="sidebar-title">Menu</span>
+            <nav class="sidebar-nav">
+                <button class="tab-btn active" data-tab="manual">
+                    <span class="tab-icon">+</span>
+                    <span>Manual Donate</span>
+                </button>
+                <button class="tab-btn" data-tab="log">
+                    <span class="tab-icon">≡</span>
+                    <span>Log Donate</span>
+                    <span id="logCount" class="tab-count">0</span>
+                </button>
+                <button class="tab-btn hidden" data-tab="users" id="tabBtnUsers">
+                    <span class="tab-icon">☉</span>
+                    <span>Kelola Akun</span>
+                </button>
+            </nav>
+        </aside>
+
+        <main class="content">
+            <div class="stats">
+                <div class="stat-card">
+                    <span class="stat-label">Total Donasi</span>
+                    <strong id="statTotalCount">0</strong>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-label">Total Nominal</span>
+                    <strong id="statTotalAmount">Rp 0</strong>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-label">Hari Ini</span>
+                    <strong id="statTodayAmount">Rp 0</strong>
+                    <span class="stat-sub" id="statTodayCount">0 donasi</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-label">Gagal Terkirim</span>
+                    <strong id="statFailed" class="danger-text">0</strong>
+                </div>
+            </div>
+
+            <!-- TAB: MANUAL DONATE -->
+            <div id="tabManual" class="tab-panel">
+                <div class="panel">
+                    <div class="panel-head">
+                        <h2>Manual Donate</h2>
+                        <span class="muted small">Langsung masuk ke Roblox</span>
+                    </div>
+                    <form id="manualForm" class="form manual-form" autocomplete="off">
+                        <label for="mName">Username</label>
+                        <input type="text" id="mName" maxlength="50" placeholder="Nama donatur / username Roblox" required>
+
+                        <label for="mAmount">Amount (Rp)</label>
+                        <input type="number" id="mAmount" min="1" max="1000000000" step="1" placeholder="10000" required>
+                        <div class="quick-amounts">
+                            <button type="button" class="chip" data-amount="5000">5rb</button>
+                            <button type="button" class="chip" data-amount="10000">10rb</button>
+                            <button type="button" class="chip" data-amount="50000">50rb</button>
+                            <button type="button" class="chip" data-amount="100000">100rb</button>
+                        </div>
+
+                        <label for="mMessage">Message</label>
+                        <textarea id="mMessage" maxlength="200" rows="3" placeholder="Pesan donasi (opsional)"></textarea>
+                        <span class="counter"><span id="msgCount">0</span>/200</span>
+
+                        <button type="submit" id="manualSubmit" class="btn primary block">Kirim ke Roblox</button>
+                    </form>
+                </div>
+            </div>
+
+            <!-- TAB: LOG DONATE -->
+            <div id="tabLog" class="tab-panel hidden">
+                <div class="panel">
+                    <div class="panel-head">
+                        <h2>Log Donasi Masuk</h2>
+                        <div class="panel-actions">
+                            <select id="filterPlatform">
+                                <option value="all">Semua platform</option>
+                                <option value="saweria">Saweria</option>
+                                <option value="sociabuzz">Sociabuzz</option>
+                                <option value="bagibagi">BagiBagi</option>
+                                <option value="manual">Manual</option>
+                                <option value="test">Test</option>
+                            </select>
+                            <button id="refreshBtn" class="btn ghost">Refresh</button>
+                            <button id="exportBtn" class="btn ghost">Export Excel</button>
+                            <button id="clearBtn" class="btn danger">Hapus Log</button>
+                        </div>
+                    </div>
+                    <div id="logList" class="log-list">
+                        <p class="empty">Belum ada donasi masuk.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB: KELOLA AKUN -->
+            <div id="tabUsers" class="tab-panel hidden">
+                <div class="panel">
+                    <div class="panel-head">
+                        <h2>Tambah Akun</h2>
+                        <span class="muted small">Password disimpan dalam bentuk hash</span>
+                    </div>
+                    <form id="userForm" class="form user-form" autocomplete="off">
+                        <div class="user-form-row">
+                            <div>
+                                <label for="uName">Username</label>
+                                <input type="text" id="uName" maxlength="20" placeholder="contoh: staff01" required>
+                            </div>
+                            <div>
+                                <label for="uPassword">Password</label>
+                                <input type="password" id="uPassword" minlength="8" placeholder="minimal 8 karakter" required>
+                            </div>
+                            <div>
+                                <label for="uRole">Peran</label>
+                                <select id="uRole" class="block-select">
+                                    <option value="staff">Staff — log &amp; manual donate</option>
+                                    <option value="admin">Admin — penuh + kelola akun</option>
+                                </select>
+                            </div>
+                        </div>
+                        <button type="submit" id="userSubmit" class="btn primary">Buat Akun</button>
+                    </form>
+                </div>
+
+                <div class="panel" style="margin-top:16px">
+                    <div class="panel-head">
+                        <h2>Daftar Akun</h2>
+                        <button id="refreshUsersBtn" class="btn ghost">Refresh</button>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="user-table">
+                            <thead>
+                                <tr>
+                                    <th>Username</th>
+                                    <th>Peran</th>
+                                    <th>Dibuat</th>
+                                    <th>Login Terakhir</th>
+                                    <th>Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody id="userTableBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+</section>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/app.js?v=9"></script>
+</body>
+</html>
