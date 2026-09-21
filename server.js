@@ -99,60 +99,155 @@ async function sendToRoblox(donation) {
 }
 
 // ============================================
-// DONATION LOG STORE (memori + file)
+// DONATION LOG STORE (file lokal / Upstash Redis / JSONBin)
 // ============================================
 const donationLog = [];
 let seqCounter = 0;
 
-function loadLog() {
+const STORAGE = {
+    upstashUrl: process.env.UPSTASH_REDIS_REST_URL || '',
+    upstashToken: process.env.UPSTASH_REDIS_REST_TOKEN || '',
+    upstashKey: process.env.UPSTASH_KEY || 'lemansion:donations',
+    jsonbinKey: process.env.JSONBIN_KEY || '',
+    jsonbinId: process.env.JSONBIN_BIN_ID || ''
+};
+
+// Driver ditentukan dari env yang tersedia; file lokal jadi cadangan terakhir
+const STORAGE_DRIVER =
+    (STORAGE.upstashUrl && STORAGE.upstashToken) ? 'upstash' :
+    (STORAGE.jsonbinKey && STORAGE.jsonbinId) ? 'jsonbin' :
+    'file';
+
+async function storageRead() {
+    if (STORAGE_DRIVER === 'upstash') {
+        const res = await fetch(STORAGE.upstashUrl, {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${STORAGE.upstashToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(['GET', STORAGE.upstashKey])
+        });
+        if (!res.ok) throw new Error(`Upstash GET ${res.status}: ${await res.text()}`);
+
+        const data = await res.json();
+        return data.result ? JSON.parse(data.result) : [];
+    }
+
+    if (STORAGE_DRIVER === 'jsonbin') {
+        const res = await fetch(`https://api.jsonbin.io/v3/b/${STORAGE.jsonbinId}/latest`, {
+            headers: { 'X-Master-Key': STORAGE.jsonbinKey, 'X-Bin-Meta': 'false' }
+        });
+        if (!res.ok) throw new Error(`JSONBin GET ${res.status}: ${await res.text()}`);
+
+        const data = await res.json();
+        return Array.isArray(data) ? data : (data.record || []);
+    }
+
     try {
-        const raw = fs.readFileSync(CONFIG.LOG_FILE, 'utf8');
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-            donationLog.push(...parsed.slice(-CONFIG.MAX_LOG));
-
-            // Entri lama belum punya seq; beri nomor urut agar sinkronisasi dashboard tetap jalan
-            for (const entry of donationLog) {
-                if (Number.isFinite(entry.seq)) seqCounter = Math.max(seqCounter, entry.seq);
-                else entry.seq = ++seqCounter;
-            }
-
-            console.log(`[LOG] 📂 Loaded ${donationLog.length} donasi dari ${CONFIG.LOG_FILE}`);
-        }
+        return JSON.parse(fs.readFileSync(CONFIG.LOG_FILE, 'utf8'));
     } catch (error) {
-        if (error.code !== 'ENOENT') {
-            console.warn('[LOG] ⚠️ Gagal membaca file log:', error.message);
-        }
+        if (error.code === 'ENOENT') return [];
+        throw error;
     }
 }
 
-let savePending = false;
-function saveLog() {
-    if (savePending) return;
-    savePending = true;
-    setTimeout(() => {
-        savePending = false;
-        writeLogSync();
-    }, 500);
+async function storageWrite(entries) {
+    const payload = JSON.stringify(entries);
+
+    if (STORAGE_DRIVER === 'upstash') {
+        const res = await fetch(STORAGE.upstashUrl, {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${STORAGE.upstashToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(['SET', STORAGE.upstashKey, payload])
+        });
+        if (!res.ok) throw new Error(`Upstash SET ${res.status}: ${await res.text()}`);
+        return;
+    }
+
+    if (STORAGE_DRIVER === 'jsonbin') {
+        const res = await fetch(`https://api.jsonbin.io/v3/b/${STORAGE.jsonbinId}`, {
+            method: 'PUT',
+            headers: {
+                'X-Master-Key': STORAGE.jsonbinKey,
+                'Content-Type': 'application/json'
+            },
+            body: payload
+        });
+        if (!res.ok) throw new Error(`JSONBin PUT ${res.status}: ${await res.text()}`);
+        return;
+    }
+
+    writeFileLog(payload);
 }
 
 // Tulis lewat file sementara agar isi lama tidak rusak bila proses mati di tengah penulisan
-function writeLogSync() {
+function writeFileLog(payload) {
+    fs.mkdirSync(path.dirname(CONFIG.LOG_FILE), { recursive: true });
+    const tmp = `${CONFIG.LOG_FILE}.tmp`;
+    fs.writeFileSync(tmp, payload);
+    fs.renameSync(tmp, CONFIG.LOG_FILE);
+}
+
+async function loadLog() {
     try {
-        fs.mkdirSync(path.dirname(CONFIG.LOG_FILE), { recursive: true });
-        const tmp = `${CONFIG.LOG_FILE}.tmp`;
-        fs.writeFileSync(tmp, JSON.stringify(donationLog, null, 2));
-        fs.renameSync(tmp, CONFIG.LOG_FILE);
+        const parsed = await storageRead();
+        if (!Array.isArray(parsed)) return;
+
+        donationLog.push(...parsed.slice(-CONFIG.MAX_LOG));
+
+        // Entri lama belum punya seq; beri nomor urut agar sinkronisasi dashboard tetap jalan
+        for (const entry of donationLog) {
+            if (Number.isFinite(entry.seq)) seqCounter = Math.max(seqCounter, entry.seq);
+            else entry.seq = ++seqCounter;
+        }
+
+        console.log(`[LOG] 📂 Memuat ${donationLog.length} donasi dari penyimpanan "${STORAGE_DRIVER}"`);
+    } catch (error) {
+        console.warn('[LOG] ⚠️ Gagal memuat log:', error.message);
+    }
+}
+
+let saveTimer = null;
+let flushing = false;
+let dirty = false;
+
+function saveLog() {
+    if (saveTimer) return;
+    saveTimer = setTimeout(() => {
+        saveTimer = null;
+        flushLog();
+    }, 800);
+}
+
+async function flushLog() {
+    if (flushing) {
+        dirty = true;
+        return;
+    }
+
+    flushing = true;
+    try {
+        do {
+            dirty = false;
+            await storageWrite(donationLog);
+        } while (dirty);
     } catch (error) {
         console.warn('[LOG] ⚠️ Gagal menyimpan log:', error.message);
+    } finally {
+        flushing = false;
     }
 }
 
 // Pastikan donasi terakhir ikut tersimpan saat server dimatikan/di-deploy ulang
 for (const signal of ['SIGINT', 'SIGTERM']) {
-    process.on(signal, () => {
+    process.on(signal, async () => {
         console.log(`\n[LOG] 💾 Menyimpan ${donationLog.length} donasi sebelum keluar (${signal})...`);
-        writeLogSync();
+        clearTimeout(saveTimer);
+        await flushLog();
         process.exit(0);
     });
 }
@@ -774,7 +869,9 @@ app.get('/health', (req, res) => {
         timestamp: new Date().toISOString(),
         platforms: ['saweria', 'sociabuzz', 'bagibagi', 'manual'],
         mode: 'direct-send (no queue)',
-        logged: donationLog.length
+        storage: STORAGE_DRIVER,
+        logged: donationLog.length,
+        lastSeq: seqCounter
     });
 });
 
@@ -811,43 +908,57 @@ app.get('/api/info', (req, res) => {
 // ============================================
 // START SERVER
 // ============================================
-loadLog();
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log('');
-    console.log('🚀 ===============================================');
-    console.log('🚀 Multi-Platform Donation Server v3.0');
-    console.log('🚀 Mode: Direct Send + Web Dashboard');
-    console.log('🚀 ===============================================');
-    console.log(`📡 Server running on port ${PORT}`);
-    console.log(`🏛️  Lobby:     http://localhost:${PORT}`);
-    console.log(`🖥️  Dashboard: http://localhost:${PORT}/dashboard`);
-    console.log('');
-    console.log('📋 Webhook Endpoints:');
-    console.log('   • Saweria:    POST /webhook/saweria');
-    console.log('   • Sociabuzz:  POST /webhook/sociabuzz');
-    console.log('   • BagiBagi:   POST /webhook/bagibagi');
-    console.log('   • Universal:  POST /webhook');
-    console.log('   • Manual:     POST /api/manual-donate (butuh login)');
-    console.log('');
-    console.log('🎮 Roblox MessagingService:');
-    console.log(`   • Topic: ${CONFIG.MESSAGING_TOPIC}`);
-    console.log(`   • Universe ID: ${CONFIG.UNIVERSE_ID}`);
-    console.log('');
-    console.log(`👥 Akun dashboard (${USERS.size}): ${[...USERS.keys()].join(', ')}`);
-    if (!CONFIG.SESSION_SECRET) {
-        console.log('ℹ️  SESSION_SECRET belum diset, kunci sesi diturunkan dari konfigurasi akun.');
-        console.log('ℹ️  Catatan: mengubah akun/password akan otomatis mengakhiri sesi yang sedang berjalan.');
-    }
-    if (!CONFIG.DASHBOARD_USERS) {
-        console.log('⚠️  PERINGATAN: Belum ada DASHBOARD_USERS, memakai akun default "admin".');
-        console.log('⚠️  Set DASHBOARD_USERS="user1:pass1,user2:pass2" agar tiap orang punya akun sendiri.');
-    }
-    if (USERS.get('admin') === 'admin123') {
-        console.log('⚠️  PERINGATAN: Password masih default (admin123). Ganti sebelum deploy!');
-    }
-    console.log('');
-    console.log('✅ Ready to receive donations!');
-    console.log('🚀 ===============================================');
+
+const STORAGE_LABEL = {
+    upstash: 'Upstash Redis (persisten)',
+    jsonbin: 'JSONBin.io (persisten)',
+    file: `File lokal — ${CONFIG.LOG_FILE}`
+};
+
+loadLog().then(() => {
+    app.listen(PORT, () => {
+        console.log('');
+        console.log('🚀 ===============================================');
+        console.log('🚀 Multi-Platform Donation Server v3.0');
+        console.log('🚀 Mode: Direct Send + Web Dashboard');
+        console.log('🚀 ===============================================');
+        console.log(`📡 Server running on port ${PORT}`);
+        console.log(`🏛️  Lobby:     http://localhost:${PORT}`);
+        console.log(`🖥️  Dashboard: http://localhost:${PORT}/dashboard`);
+        console.log('');
+        console.log('📋 Webhook Endpoints:');
+        console.log('   • Saweria:    POST /webhook/saweria');
+        console.log('   • Sociabuzz:  POST /webhook/sociabuzz');
+        console.log('   • BagiBagi:   POST /webhook/bagibagi');
+        console.log('   • Universal:  POST /webhook');
+        console.log('   • Manual:     POST /api/manual-donate (butuh login)');
+        console.log('');
+        console.log('🎮 Roblox MessagingService:');
+        console.log(`   • Topic: ${CONFIG.MESSAGING_TOPIC}`);
+        console.log(`   • Universe ID: ${CONFIG.UNIVERSE_ID}`);
+        console.log('');
+        console.log(`💾 Penyimpanan log: ${STORAGE_LABEL[STORAGE_DRIVER]}`);
+        if (STORAGE_DRIVER === 'file') {
+            console.log('⚠️  File lokal HILANG setiap deploy ulang di Railway/Render.');
+            console.log('⚠️  Pakai volume persisten (set LOG_FILE ke path volume) atau isi');
+            console.log('⚠️  UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN agar data aman.');
+        }
+        console.log('');
+        console.log(`👥 Akun dashboard (${USERS.size}): ${[...USERS.keys()].join(', ')}`);
+        if (!CONFIG.SESSION_SECRET) {
+            console.log('ℹ️  SESSION_SECRET belum diset, kunci sesi diturunkan dari konfigurasi akun.');
+            console.log('ℹ️  Catatan: mengubah akun/password akan otomatis mengakhiri sesi yang sedang berjalan.');
+        }
+        if (!CONFIG.DASHBOARD_USERS) {
+            console.log('⚠️  PERINGATAN: Belum ada DASHBOARD_USERS, memakai akun default "admin".');
+            console.log('⚠️  Set DASHBOARD_USERS="user1:pass1,user2:pass2" agar tiap orang punya akun sendiri.');
+        }
+        if (USERS.get('admin') === 'admin123') {
+            console.log('⚠️  PERINGATAN: Password masih default (admin123). Ganti sebelum deploy!');
+        }
+        console.log('');
+        console.log('✅ Ready to receive donations!');
+        console.log('🚀 ===============================================');
+    });
 });
