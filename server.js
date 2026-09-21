@@ -125,30 +125,67 @@ const STORAGE_DRIVER =
     (STORAGE.jsonbinKey && STORAGE.jsonbinId) ? 'jsonbin' :
     'file';
 
+const storageState = {
+    driver: STORAGE_DRIVER,
+    ready: false,          // true setelah minimal satu kali berhasil membaca
+    lastError: null,
+    lastSavedAt: null,
+    saves: 0
+};
+
+async function withRetry(label, fn, attempts = 3) {
+    let lastError;
+    for (let i = 1; i <= attempts; i += 1) {
+        try {
+            return await fn();
+        } catch (error) {
+            lastError = error;
+            console.warn(`[LOG] ⚠️ ${label} gagal (percobaan ${i}/${attempts}): ${error.message}`);
+            if (i < attempts) await new Promise((resolve) => setTimeout(resolve, i * 700));
+        }
+    }
+    throw lastError;
+}
+
+async function upstashCommand(command) {
+    const res = await fetch(STORAGE.upstashUrl, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${STORAGE.upstashToken}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(command)
+    });
+
+    const text = await res.text();
+    if (!res.ok) throw new Error(`Upstash ${command[0]} HTTP ${res.status}: ${text.slice(0, 200)}`);
+
+    let data;
+    try {
+        data = JSON.parse(text);
+    } catch {
+        throw new Error(`Upstash ${command[0]}: respons bukan JSON — ${text.slice(0, 200)}`);
+    }
+    if (data.error) throw new Error(`Upstash ${command[0]}: ${data.error}`);
+
+    return data.result;
+}
+
 async function storageRead() {
     if (STORAGE_DRIVER === 'upstash') {
-        const res = await fetch(STORAGE.upstashUrl, {
-            method: 'POST',
-            headers: {
-                Authorization: `Bearer ${STORAGE.upstashToken}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(['GET', STORAGE.upstashKey])
-        });
-        if (!res.ok) throw new Error(`Upstash GET ${res.status}: ${await res.text()}`);
-
-        const data = await res.json();
-        return data.result ? JSON.parse(data.result) : [];
+        const result = await upstashCommand(['GET', STORAGE.upstashKey]);
+        return result ? JSON.parse(result) : [];
     }
 
     if (STORAGE_DRIVER === 'jsonbin') {
         const res = await fetch(`https://api.jsonbin.io/v3/b/${STORAGE.jsonbinId}/latest`, {
             headers: { 'X-Master-Key': STORAGE.jsonbinKey, 'X-Bin-Meta': 'false' }
         });
-        if (!res.ok) throw new Error(`JSONBin GET ${res.status}: ${await res.text()}`);
+        const text = await res.text();
+        if (!res.ok) throw new Error(`JSONBin GET HTTP ${res.status}: ${text.slice(0, 200)}`);
 
-        const data = await res.json();
-        return Array.isArray(data) ? data : (data.record || []);
+        const data = JSON.parse(text);
+        return Array.isArray(data) ? data : (Array.isArray(data.record) ? data.record : []);
     }
 
     try {
@@ -163,15 +200,7 @@ async function storageWrite(entries) {
     const payload = JSON.stringify(entries);
 
     if (STORAGE_DRIVER === 'upstash') {
-        const res = await fetch(STORAGE.upstashUrl, {
-            method: 'POST',
-            headers: {
-                Authorization: `Bearer ${STORAGE.upstashToken}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(['SET', STORAGE.upstashKey, payload])
-        });
-        if (!res.ok) throw new Error(`Upstash SET ${res.status}: ${await res.text()}`);
+        await upstashCommand(['SET', STORAGE.upstashKey, payload]);
         return;
     }
 
@@ -184,7 +213,7 @@ async function storageWrite(entries) {
             },
             body: payload
         });
-        if (!res.ok) throw new Error(`JSONBin PUT ${res.status}: ${await res.text()}`);
+        if (!res.ok) throw new Error(`JSONBin PUT HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
         return;
     }
 
@@ -201,7 +230,7 @@ function writeFileLog(payload) {
 
 async function loadLog() {
     try {
-        const parsed = await storageRead();
+        const parsed = await withRetry('Baca log', storageRead);
         if (!Array.isArray(parsed)) return;
 
         donationLog.push(...parsed.slice(-CONFIG.MAX_LOG));
@@ -212,9 +241,14 @@ async function loadLog() {
             else entry.seq = ++seqCounter;
         }
 
+        storageState.ready = true;
+        storageState.lastError = null;
         console.log(`[LOG] 📂 Memuat ${donationLog.length} donasi dari penyimpanan "${STORAGE_DRIVER}"`);
     } catch (error) {
-        console.warn('[LOG] ⚠️ Gagal memuat log:', error.message);
+        storageState.ready = false;
+        storageState.lastError = error.message;
+        console.error('[LOG] ❌ GAGAL membaca penyimpanan:', error.message);
+        console.error('[LOG] ❌ Penulisan ditahan agar data lama tidak tertimpa data kosong.');
     }
 }
 
@@ -240,10 +274,29 @@ async function flushLog() {
     try {
         do {
             dirty = false;
-            await storageWrite(donationLog);
+
+            // Jangan menimpa penyimpanan sebelum isinya pernah terbaca dengan sukses
+            if (!storageState.ready) {
+                const remote = await withRetry('Pemulihan baca penyimpanan', storageRead);
+                if (Array.isArray(remote)) {
+                    const known = new Set(donationLog.map((d) => d.id));
+                    const restored = remote.filter((d) => d && d.id && !known.has(d.id));
+                    if (restored.length > 0) {
+                        donationLog.unshift(...restored);
+                        console.log(`[LOG] ♻️ Memulihkan ${restored.length} entri dari penyimpanan`);
+                    }
+                }
+                storageState.ready = true;
+            }
+
+            await withRetry('Tulis penyimpanan', storageWrite.bind(null, donationLog));
+            storageState.saves += 1;
+            storageState.lastSavedAt = Date.now();
+            storageState.lastError = null;
         } while (dirty);
     } catch (error) {
-        console.warn('[LOG] ⚠️ Gagal menyimpan log:', error.message);
+        storageState.lastError = error.message;
+        console.error('[LOG] ❌ GAGAL menyimpan log:', error.message);
     } finally {
         flushing = false;
     }
