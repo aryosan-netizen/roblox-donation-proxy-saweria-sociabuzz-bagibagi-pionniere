@@ -102,6 +102,7 @@ async function sendToRoblox(donation) {
 // DONATION LOG STORE (memori + file)
 // ============================================
 const donationLog = [];
+let seqCounter = 0;
 
 function loadLog() {
     try {
@@ -109,6 +110,13 @@ function loadLog() {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
             donationLog.push(...parsed.slice(-CONFIG.MAX_LOG));
+
+            // Entri lama belum punya seq; beri nomor urut agar sinkronisasi dashboard tetap jalan
+            for (const entry of donationLog) {
+                if (Number.isFinite(entry.seq)) seqCounter = Math.max(seqCounter, entry.seq);
+                else entry.seq = ++seqCounter;
+            }
+
             console.log(`[LOG] 📂 Loaded ${donationLog.length} donasi dari ${CONFIG.LOG_FILE}`);
         }
     } catch (error) {
@@ -177,6 +185,7 @@ async function processDonation(input) {
 
     const entry = {
         id: crypto.randomUUID(),
+        seq: ++seqCounter,
         ...donation,
         source: input.source || 'webhook',
         by: input.by || null,
@@ -191,6 +200,7 @@ async function processDonation(input) {
     }
     saveLog();
     broadcast('donation', entry);
+    console.log(`[LOG] 📝 Tercatat #${entry.seq} (${entry.platform}) — total ${donationLog.length} entri`);
 
     return { ...entry, roblox };
 }
@@ -592,6 +602,7 @@ app.get('/api/donations', requireAuth, (req, res) => {
     res.json({
         success: true,
         total: donationLog.length,
+        lastSeq: seqCounter,
         donations: donationLog.slice(-limit).reverse()
     });
 });

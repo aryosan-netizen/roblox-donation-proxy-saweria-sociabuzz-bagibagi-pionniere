@@ -160,6 +160,9 @@ function connectStream() {
         if (state.donations.some((d) => d.id === entry.id)) return;
 
         state.donations.unshift(entry);
+        state.donations.sort(
+            (a, b) => (Number(b.seq) || 0) - (Number(a.seq) || 0) || b.timestamp - a.timestamp
+        );
         renderLog();
         renderStats();
         if (!(entry.source === 'manual' && entry.by === state.username)) {
@@ -180,9 +183,9 @@ function connectStream() {
     };
 }
 
-// Cadangan bila SSE terputus (proxy/hosting kadang memutus koneksi panjang)
+// Penyegaran berkala: jaring pengaman bila SSE terputus atau tertahan proxy
 setInterval(() => {
-    if (state.token && !state.live && !document.hidden) loadDonations();
+    if (state.token && !document.hidden) loadDonations();
 }, 30000);
 
 document.addEventListener('visibilitychange', () => {
@@ -203,33 +206,42 @@ function showTab(name, focusInput = false) {
     el('tabLog').classList.toggle('hidden', active !== 'log');
 
     if (active === 'manual' && focusInput) el('mName').focus();
+    if (active === 'log' && state.token) loadDonations();
 }
 
 document.querySelectorAll('.tab-btn').forEach((btn) => {
     btn.addEventListener('click', () => showTab(btn.dataset.tab, true));
 });
 
-showTab(localStorage.getItem(TAB_KEY) || 'manual');
-
 // ---------- DATA ----------
-async function loadDonations() {
-    const requestedAt = Date.now();
-    try {
-        const data = await api('/api/donations?limit=500');
-        mergeDonations(data.donations, requestedAt);
-    } catch (err) {
-        toast(err.message, true);
-    }
+let loadInFlight = null;
+
+function loadDonations() {
+    // Satu request pada satu waktu agar snapshot lama tidak menimpa hasil yang lebih baru
+    if (loadInFlight) return loadInFlight;
+
+    loadInFlight = api('/api/donations?limit=500')
+        .then((data) => {
+            if (Array.isArray(data.donations)) {
+                mergeDonations(data.donations, Number(data.lastSeq) || 0);
+            }
+        })
+        .catch((err) => toast(err.message, true))
+        .finally(() => { loadInFlight = null; });
+
+    return loadInFlight;
 }
 
-// Snapshot server jadi acuan, tapi donasi yang masuk saat request berjalan tetap dipertahankan
-function mergeDonations(list, requestedAt) {
+// Snapshot server jadi acuan; entri lokal hanya dipertahankan bila nomor urutnya lebih baru
+function mergeDonations(list, lastSeq) {
     const serverIds = new Set(list.map((d) => d.id));
     const pending = state.donations.filter(
-        (d) => !serverIds.has(d.id) && d.timestamp >= requestedAt - 5000
+        (d) => !serverIds.has(d.id) && Number(d.seq) > lastSeq
     );
 
-    state.donations = [...pending, ...list].sort((a, b) => b.timestamp - a.timestamp);
+    state.donations = [...pending, ...list].sort(
+        (a, b) => (Number(b.seq) || 0) - (Number(a.seq) || 0) || b.timestamp - a.timestamp
+    );
     renderLog();
     renderStats();
 }
@@ -426,4 +438,5 @@ el('clearBtn').addEventListener('click', async () => {
     }
 });
 
+showTab(localStorage.getItem(TAB_KEY) || 'log');
 boot();
