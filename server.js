@@ -429,6 +429,7 @@ const USER_RULES = {
 };
 
 let users = [];                      // { username, role, salt, hash, createdAt, createdBy, lastLoginAt, credVersion }
+let usersReady = false;              // true setelah daftar akun berhasil dibaca minimal sekali
 let USERS_SEED_WARNING = false;
 
 // Akun darurat dari env; selalu valid dan tidak bisa dihapus lewat panel
@@ -521,6 +522,8 @@ async function writeUsersToStorage() {
 }
 
 async function saveUsers() {
+    // Tanpa pembacaan yang sukses, menulis berarti menimpa daftar akun dengan data kosong
+    if (!usersReady) throw new Error('daftar akun belum berhasil dibaca dari penyimpanan');
     await withRetry('Tulis akun', writeUsersToStorage);
 }
 
@@ -528,9 +531,12 @@ async function loadUsers() {
     try {
         const stored = await withRetry('Baca akun', readUsersFromStorage);
         users = Array.isArray(stored) ? stored.filter((u) => u && u.username && u.hash && u.salt) : [];
+        usersReady = true;
         console.log(`[AUTH] 👥 Memuat ${users.length} akun dari penyimpanan "${STORAGE_DRIVER}"`);
     } catch (error) {
+        usersReady = false;
         console.error('[AUTH] ❌ GAGAL membaca daftar akun:', error.message);
+        console.error('[AUTH] ❌ Penulisan akun ditahan agar daftar lama tidak tertimpa.');
         users = [];
         return;
     }
@@ -897,25 +903,6 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ============================================
-// TEST ENDPOINT - Untuk testing manual
-// ============================================
-app.post('/test', async (req, res) => {
-    console.log('\n[TEST] ========== TEST DONATION ==========');
-    
-    const { donatorName, amount, message, platform } = req.body;
-    
-    const entry = await processDonation({
-        platform: platform || 'test',
-        donatorName: donatorName || 'Test User',
-        amount: Number(amount) || 10000,
-        message: message || 'Test donation',
-        source: 'test'
-    });
-    
-    res.json({ success: true, platform: 'test', roblox: entry.roblox });
-});
-
-// ============================================
 // API DASHBOARD
 // ============================================
 app.post('/api/login', async (req, res) => {
@@ -1094,11 +1081,7 @@ app.get('/api/donations', requireAuth, (req, res) => {
     });
 });
 
-app.get('/api/stats', requireAuth, (req, res) => {
-    res.json({ success: true, stats: buildStats() });
-});
-
-app.delete('/api/donations', requireAuth, async (req, res) => {
+app.delete('/api/donations', requireAuth, requireAdmin, async (req, res) => {
     try {
         await clearLog();
     } catch (error) {
@@ -1214,33 +1197,6 @@ app.get('/api/stream', requireAuth, (req, res) => {
     req.on('close', () => sseClients.delete(res));
 });
 
-function buildStats() {
-    // Pakai CONFIG.TIMEZONE agar "hari ini" tidak mengikuti zona waktu server (hosting umumnya UTC)
-    const today = dateKey(Date.now());
-
-    const stats = {
-        totalDonations: donationLog.length,
-        totalAmount: 0,
-        todayAmount: 0,
-        todayCount: 0,
-        failed: 0,
-        byPlatform: {}
-    };
-
-    for (const entry of donationLog) {
-        const amount = Number(entry.amount) || 0;
-        stats.totalAmount += amount;
-        if (entry.status === 'failed') stats.failed += 1;
-        if (dateKey(entry.timestamp) === today) {
-            stats.todayAmount += amount;
-            stats.todayCount += 1;
-        }
-        stats.byPlatform[entry.platform] = (stats.byPlatform[entry.platform] || 0) + 1;
-    }
-
-    return stats;
-}
-
 // ============================================
 // STATUS ENDPOINTS
 // ============================================
@@ -1249,13 +1205,11 @@ app.get('/dashboard', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
 });
 
-// Status ringkas untuk lobby (tanpa data donatur)
+// Status untuk indikator di lobby; sengaja tidak memuat konfigurasi internal
 app.get('/api/status', (req, res) => {
     res.json({
         status: 'online',
         platforms: ['saweria', 'sociabuzz', 'bagibagi', 'manual'],
-        universeId: CONFIG.UNIVERSE_ID,
-        topic: CONFIG.MESSAGING_TOPIC,
         uptime: Math.floor(process.uptime())
     });
 });
@@ -1264,46 +1218,15 @@ app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
-        platforms: ['saweria', 'sociabuzz', 'bagibagi', 'manual'],
-        mode: 'direct-send (no queue)',
         logged: donationLog.length,
         lastSeq: seqCounter,
+        accounts: users.length,
         storage: {
             driver: storageState.driver,
             ready: storageState.ready,
             saves: storageState.saves,
             lastSavedAt: storageState.lastSavedAt ? new Date(storageState.lastSavedAt).toISOString() : null,
             lastError: storageState.lastError
-        }
-    });
-});
-
-app.get('/api/info', (req, res) => {
-    res.json({
-        name: 'Multi-Platform Donation Server',
-        version: '3.0.0',
-        description: 'Saweria, Sociabuzz, BagiBagi & Manual → Roblox MessagingService (Direct Send)',
-        endpoints: {
-            webhooks: {
-                saweria: 'POST /webhook/saweria',
-                sociabuzz: 'POST /webhook/sociabuzz',
-                bagibagi: 'POST /webhook/bagibagi',
-                universal: 'POST /webhook (auto-detect)'
-            },
-            dashboard: {
-                login: 'POST /api/login',
-                donations: 'GET /api/donations',
-                stats: 'GET /api/stats',
-                manual: 'POST /api/manual-donate',
-                export: 'GET /api/export.xlsx',
-                stream: 'GET /api/stream'
-            },
-            test: 'POST /test',
-            health: 'GET /health'
-        },
-        config: {
-            topic: CONFIG.MESSAGING_TOPIC,
-            universeId: CONFIG.UNIVERSE_ID
         }
     });
 });

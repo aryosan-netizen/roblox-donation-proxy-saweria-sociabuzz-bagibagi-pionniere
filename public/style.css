@@ -291,16 +291,7 @@ select { width: auto; padding: 8px 10px; font-size: 13px; }
 .stat-card strong { font-size: 22px; }
 .stat-sub { font-size: 11px; color: var(--muted); }
 
-.grid {
-    display: grid;
-    grid-template-columns: 340px 1fr;
-    gap: 16px;
-    align-items: start;
-}
-
 @media (max-width: 900px) {
-    .grid { grid-template-columns: 1fr; }
-
     .layout { grid-template-columns: 1fr; }
 
     .sidebar {

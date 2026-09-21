@@ -20,7 +20,6 @@ const state = {
     donations: [],
     filter: 'all',
     stream: null,
-    live: false,
     connectedOnce: false
 };
 
@@ -142,7 +141,6 @@ el('logoutBtn').addEventListener('click', async () => {
 
 // ---------- LIVE STREAM ----------
 function setConnection(online) {
-    state.live = online;
     const node = el('connStatus');
     node.classList.toggle('online', online);
     node.classList.toggle('offline', !online);
