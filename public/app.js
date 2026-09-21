@@ -88,7 +88,6 @@ function showApp() {
     el('appView').classList.remove('hidden');
     el('currentUser').textContent = state.username ? `@${state.username}` : '';
     loadDonations();
-    loadStats();
     connectStream();
 }
 
@@ -153,10 +152,7 @@ function connectStream() {
     stream.addEventListener('connected', () => {
         setConnection(true);
         // Ambil ulang log agar donasi yang masuk saat koneksi putus tidak terlewat
-        if (state.connectedOnce) {
-            loadDonations();
-            loadStats();
-        }
+        if (state.connectedOnce) loadDonations();
         state.connectedOnce = true;
     });
     stream.addEventListener('donation', (e) => {
@@ -165,7 +161,7 @@ function connectStream() {
 
         state.donations.unshift(entry);
         renderLog();
-        loadStats();
+        renderStats();
         if (!(entry.source === 'manual' && entry.by === state.username)) {
             toast(`Donasi baru: ${entry.donatorName} — ${rupiah(entry.amount)}`);
         }
@@ -173,7 +169,7 @@ function connectStream() {
     stream.addEventListener('cleared', () => {
         state.donations = [];
         renderLog();
-        loadStats();
+        renderStats();
     });
     stream.onerror = () => {
         setConnection(false);
@@ -186,39 +182,61 @@ function connectStream() {
 
 // Cadangan bila SSE terputus (proxy/hosting kadang memutus koneksi panjang)
 setInterval(() => {
-    if (state.token && !state.live && !document.hidden) {
-        loadDonations();
-        loadStats();
-    }
+    if (state.token && !state.live && !document.hidden) loadDonations();
 }, 30000);
 
 document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && state.token) {
-        loadDonations();
-        loadStats();
-    }
+    if (!document.hidden && state.token) loadDonations();
 });
 
 // ---------- DATA ----------
 async function loadDonations() {
+    const requestedAt = Date.now();
     try {
         const data = await api('/api/donations?limit=500');
-        state.donations = data.donations;
-        renderLog();
+        mergeDonations(data.donations, requestedAt);
     } catch (err) {
         toast(err.message, true);
     }
 }
 
-async function loadStats() {
-    try {
-        const { stats } = await api('/api/stats');
-        el('statTotalCount').textContent = stats.totalDonations;
-        el('statTotalAmount').textContent = rupiah(stats.totalAmount);
-        el('statTodayAmount').textContent = rupiah(stats.todayAmount);
-        el('statTodayCount').textContent = `${stats.todayCount} donasi`;
-        el('statFailed').textContent = stats.failed;
-    } catch { /* diam saja, stats tidak kritis */ }
+// Snapshot server jadi acuan, tapi donasi yang masuk saat request berjalan tetap dipertahankan
+function mergeDonations(list, requestedAt) {
+    const serverIds = new Set(list.map((d) => d.id));
+    const pending = state.donations.filter(
+        (d) => !serverIds.has(d.id) && d.timestamp >= requestedAt - 5000
+    );
+
+    state.donations = [...pending, ...list].sort((a, b) => b.timestamp - a.timestamp);
+    renderLog();
+    renderStats();
+}
+
+function renderStats() {
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const startTs = startOfToday.getTime();
+
+    let totalAmount = 0;
+    let todayAmount = 0;
+    let todayCount = 0;
+    let failed = 0;
+
+    for (const entry of state.donations) {
+        const amount = Number(entry.amount) || 0;
+        totalAmount += amount;
+        if (entry.status === 'failed') failed += 1;
+        if (entry.timestamp >= startTs) {
+            todayAmount += amount;
+            todayCount += 1;
+        }
+    }
+
+    el('statTotalCount').textContent = state.donations.length;
+    el('statTotalAmount').textContent = rupiah(totalAmount);
+    el('statTodayAmount').textContent = rupiah(todayAmount);
+    el('statTodayCount').textContent = `${todayCount} donasi`;
+    el('statFailed').textContent = failed;
 }
 
 function renderLog() {
@@ -343,7 +361,6 @@ el('filterPlatform').addEventListener('change', (e) => {
 
 el('refreshBtn').addEventListener('click', () => {
     loadDonations();
-    loadStats();
 });
 
 el('exportBtn').addEventListener('click', async () => {
@@ -379,7 +396,7 @@ el('clearBtn').addEventListener('click', async () => {
         await api('/api/donations', { method: 'DELETE' });
         state.donations = [];
         renderLog();
-        loadStats();
+        renderStats();
         toast('Log dibersihkan');
     } catch (err) {
         toast(err.message, true);

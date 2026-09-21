@@ -713,8 +713,8 @@ app.get('/api/stream', requireAuth, (req, res) => {
 });
 
 function buildStats() {
-    const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
+    // Pakai CONFIG.TIMEZONE agar "hari ini" tidak mengikuti zona waktu server (hosting umumnya UTC)
+    const today = dateKey(Date.now());
 
     const stats = {
         totalDonations: donationLog.length,
@@ -726,10 +726,11 @@ function buildStats() {
     };
 
     for (const entry of donationLog) {
-        stats.totalAmount += entry.amount;
+        const amount = Number(entry.amount) || 0;
+        stats.totalAmount += amount;
         if (entry.status === 'failed') stats.failed += 1;
-        if (entry.timestamp >= startOfToday.getTime()) {
-            stats.todayAmount += entry.amount;
+        if (dateKey(entry.timestamp) === today) {
+            stats.todayAmount += amount;
             stats.todayCount += 1;
         }
         stats.byPlatform[entry.platform] = (stats.byPlatform[entry.platform] || 0) + 1;
