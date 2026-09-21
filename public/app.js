@@ -189,6 +189,28 @@ document.addEventListener('visibilitychange', () => {
     if (!document.hidden && state.token) loadDonations();
 });
 
+// ---------- TAB ----------
+const TAB_KEY = 'donation_dashboard_tab';
+
+function showTab(name, focusInput = false) {
+    const active = name === 'log' ? 'log' : 'manual';
+    localStorage.setItem(TAB_KEY, active);
+
+    document.querySelectorAll('.tab-btn').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.tab === active);
+    });
+    el('tabManual').classList.toggle('hidden', active !== 'manual');
+    el('tabLog').classList.toggle('hidden', active !== 'log');
+
+    if (active === 'manual' && focusInput) el('mName').focus();
+}
+
+document.querySelectorAll('.tab-btn').forEach((btn) => {
+    btn.addEventListener('click', () => showTab(btn.dataset.tab, true));
+});
+
+showTab(localStorage.getItem(TAB_KEY) || 'manual');
+
 // ---------- DATA ----------
 async function loadDonations() {
     const requestedAt = Date.now();
@@ -237,6 +259,7 @@ function renderStats() {
     el('statTodayAmount').textContent = rupiah(todayAmount);
     el('statTodayCount').textContent = `${todayCount} donasi`;
     el('statFailed').textContent = failed;
+    el('logCount').textContent = state.donations.length;
 }
 
 function renderLog() {

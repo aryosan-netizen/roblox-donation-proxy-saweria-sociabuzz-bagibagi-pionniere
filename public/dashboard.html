@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="robots" content="noindex, nofollow">
     <title>Dashboard Donasi — Lemansion</title>
-    <link rel="stylesheet" href="/style.css?v=6">
+    <link rel="stylesheet" href="/style.css?v=7">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏛️</text></svg>">
 </head>
 <body>
@@ -41,83 +41,102 @@
         </div>
     </header>
 
-    <main class="content">
-        <div class="stats">
-            <div class="stat-card">
-                <span class="stat-label">Total Donasi</span>
-                <strong id="statTotalCount">0</strong>
-            </div>
-            <div class="stat-card">
-                <span class="stat-label">Total Nominal</span>
-                <strong id="statTotalAmount">Rp 0</strong>
-            </div>
-            <div class="stat-card">
-                <span class="stat-label">Hari Ini</span>
-                <strong id="statTodayAmount">Rp 0</strong>
-                <span class="stat-sub" id="statTodayCount">0 donasi</span>
-            </div>
-            <div class="stat-card">
-                <span class="stat-label">Gagal Terkirim</span>
-                <strong id="statFailed" class="danger-text">0</strong>
-            </div>
-        </div>
+    <div class="layout">
+        <aside class="sidebar">
+            <span class="sidebar-title">Menu</span>
+            <nav class="sidebar-nav">
+                <button class="tab-btn active" data-tab="manual">
+                    <span class="tab-icon">+</span>
+                    <span>Manual Donate</span>
+                </button>
+                <button class="tab-btn" data-tab="log">
+                    <span class="tab-icon">≡</span>
+                    <span>Log Donate</span>
+                    <span id="logCount" class="tab-count">0</span>
+                </button>
+            </nav>
+        </aside>
 
-        <div class="grid">
-            <!-- MANUAL DONATE -->
-            <div class="panel">
-                <div class="panel-head">
-                    <h2>Manual Donate</h2>
-                    <span class="muted small">Langsung masuk ke Roblox</span>
+        <main class="content">
+            <div class="stats">
+                <div class="stat-card">
+                    <span class="stat-label">Total Donasi</span>
+                    <strong id="statTotalCount">0</strong>
                 </div>
-                <form id="manualForm" class="form" autocomplete="off">
-                    <label for="mName">Username</label>
-                    <input type="text" id="mName" maxlength="50" placeholder="Nama donatur / username Roblox" required>
+                <div class="stat-card">
+                    <span class="stat-label">Total Nominal</span>
+                    <strong id="statTotalAmount">Rp 0</strong>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-label">Hari Ini</span>
+                    <strong id="statTodayAmount">Rp 0</strong>
+                    <span class="stat-sub" id="statTodayCount">0 donasi</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-label">Gagal Terkirim</span>
+                    <strong id="statFailed" class="danger-text">0</strong>
+                </div>
+            </div>
 
-                    <label for="mAmount">Amount (Rp)</label>
-                    <input type="number" id="mAmount" min="1" max="1000000000" step="1" placeholder="10000" required>
-                    <div class="quick-amounts">
-                        <button type="button" class="chip" data-amount="5000">5rb</button>
-                        <button type="button" class="chip" data-amount="10000">10rb</button>
-                        <button type="button" class="chip" data-amount="50000">50rb</button>
-                        <button type="button" class="chip" data-amount="100000">100rb</button>
+            <!-- TAB: MANUAL DONATE -->
+            <div id="tabManual" class="tab-panel">
+                <div class="panel">
+                    <div class="panel-head">
+                        <h2>Manual Donate</h2>
+                        <span class="muted small">Langsung masuk ke Roblox</span>
                     </div>
+                    <form id="manualForm" class="form manual-form" autocomplete="off">
+                        <label for="mName">Username</label>
+                        <input type="text" id="mName" maxlength="50" placeholder="Nama donatur / username Roblox" required>
 
-                    <label for="mMessage">Message</label>
-                    <textarea id="mMessage" maxlength="200" rows="3" placeholder="Pesan donasi (opsional)"></textarea>
-                    <span class="counter"><span id="msgCount">0</span>/200</span>
+                        <label for="mAmount">Amount (Rp)</label>
+                        <input type="number" id="mAmount" min="1" max="1000000000" step="1" placeholder="10000" required>
+                        <div class="quick-amounts">
+                            <button type="button" class="chip" data-amount="5000">5rb</button>
+                            <button type="button" class="chip" data-amount="10000">10rb</button>
+                            <button type="button" class="chip" data-amount="50000">50rb</button>
+                            <button type="button" class="chip" data-amount="100000">100rb</button>
+                        </div>
 
-                    <button type="submit" id="manualSubmit" class="btn primary block">Kirim ke Roblox</button>
-                </form>
+                        <label for="mMessage">Message</label>
+                        <textarea id="mMessage" maxlength="200" rows="3" placeholder="Pesan donasi (opsional)"></textarea>
+                        <span class="counter"><span id="msgCount">0</span>/200</span>
+
+                        <button type="submit" id="manualSubmit" class="btn primary block">Kirim ke Roblox</button>
+                    </form>
+                </div>
             </div>
 
-            <!-- LOG -->
-            <div class="panel">
-                <div class="panel-head">
-                    <h2>Log Donasi Masuk</h2>
-                    <div class="panel-actions">
-                        <select id="filterPlatform">
-                            <option value="all">Semua platform</option>
-                            <option value="saweria">Saweria</option>
-                            <option value="sociabuzz">Sociabuzz</option>
-                            <option value="bagibagi">BagiBagi</option>
-                            <option value="manual">Manual</option>
-                            <option value="test">Test</option>
-                        </select>
-                        <button id="refreshBtn" class="btn ghost">Refresh</button>
-                        <button id="exportBtn" class="btn ghost">Export Excel</button>
-                        <button id="clearBtn" class="btn danger">Hapus Log</button>
+            <!-- TAB: LOG DONATE -->
+            <div id="tabLog" class="tab-panel hidden">
+                <div class="panel">
+                    <div class="panel-head">
+                        <h2>Log Donasi Masuk</h2>
+                        <div class="panel-actions">
+                            <select id="filterPlatform">
+                                <option value="all">Semua platform</option>
+                                <option value="saweria">Saweria</option>
+                                <option value="sociabuzz">Sociabuzz</option>
+                                <option value="bagibagi">BagiBagi</option>
+                                <option value="manual">Manual</option>
+                                <option value="test">Test</option>
+                            </select>
+                            <button id="refreshBtn" class="btn ghost">Refresh</button>
+                            <button id="exportBtn" class="btn ghost">Export Excel</button>
+                            <button id="clearBtn" class="btn danger">Hapus Log</button>
+                        </div>
+                    </div>
+                    <div id="logList" class="log-list">
+                        <p class="empty">Belum ada donasi masuk.</p>
                     </div>
                 </div>
-                <div id="logList" class="log-list">
-                    <p class="empty">Belum ada donasi masuk.</p>
-                </div>
             </div>
-        </div>
-    </main>
+        </main>
+    </div>
 </section>
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="/app.js?v=6"></script>
+<script src="/app.js?v=7"></script>
 </body>
 </html>
