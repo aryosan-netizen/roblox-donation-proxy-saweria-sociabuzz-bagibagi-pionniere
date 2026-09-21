@@ -104,12 +104,13 @@ async function sendToRoblox(donation) {
 const donationLog = [];
 let seqCounter = 0;
 
+// Nilai di-trim karena spasi ikut tersalin membuat URL/header penyimpanan tidak valid
 const STORAGE = {
-    upstashUrl: process.env.UPSTASH_REDIS_REST_URL || 'https://complete-mosquito-289057.upstash.io',
-    upstashToken: process.env.UPSTASH_REDIS_REST_TOKEN || 'ggAAAAAABGkhAAIgcDHFEAEA8IOO1Cv5WhDh7uHugv9jbPYRUh2KBLtcd-DcEQ',
-    upstashKey: process.env.UPSTASH_KEY || 'lemansion:donations',
-    jsonbinKey: process.env.JSONBIN_KEY || '',
-    jsonbinId: process.env.JSONBIN_BIN_ID || ''
+    upstashUrl: (process.env.UPSTASH_REDIS_REST_URL || 'https://complete-mosquito-289057.upstash.io').trim().replace(/\/+$/, ''),
+    upstashToken: (process.env.UPSTASH_REDIS_REST_TOKEN || 'ggAAAAAABGkhAAIgcDHFEAEA8IOO1Cv5WhDh7uHugv9jbPYRUh2KBLtcd-DcEQ').trim(),
+    upstashKey: (process.env.UPSTASH_KEY || 'lemansion:donations').trim(),
+    jsonbinKey: (process.env.JSONBIN_KEY || '').trim(),
+    jsonbinId: (process.env.JSONBIN_BIN_ID || '').trim()
 };
 
 // Driver ditentukan dari env yang tersedia; file lokal jadi cadangan terakhir
@@ -118,30 +119,68 @@ const STORAGE_DRIVER =
     (STORAGE.jsonbinKey && STORAGE.jsonbinId) ? 'jsonbin' :
     'file';
 
+const storageState = {
+    driver: STORAGE_DRIVER,
+    ready: false,          // true setelah minimal satu kali berhasil membaca
+    lastError: null,
+    lastLoadedAt: null,
+    lastSavedAt: null,
+    saves: 0
+};
+
+async function withRetry(label, fn, attempts = 3) {
+    let lastError;
+    for (let i = 1; i <= attempts; i += 1) {
+        try {
+            return await fn();
+        } catch (error) {
+            lastError = error;
+            console.warn(`[LOG] ⚠️ ${label} gagal (percobaan ${i}/${attempts}): ${error.message}`);
+            if (i < attempts) await new Promise((resolve) => setTimeout(resolve, i * 700));
+        }
+    }
+    throw lastError;
+}
+
+async function upstashCommand(command) {
+    const res = await fetch(STORAGE.upstashUrl, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${STORAGE.upstashToken}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(command)
+    });
+
+    const text = await res.text();
+    if (!res.ok) throw new Error(`Upstash ${command[0]} HTTP ${res.status}: ${text.slice(0, 200)}`);
+
+    let data;
+    try {
+        data = JSON.parse(text);
+    } catch {
+        throw new Error(`Upstash ${command[0]}: respons bukan JSON — ${text.slice(0, 200)}`);
+    }
+    if (data.error) throw new Error(`Upstash ${command[0]}: ${data.error}`);
+
+    return data.result;
+}
+
 async function storageRead() {
     if (STORAGE_DRIVER === 'upstash') {
-        const res = await fetch(STORAGE.upstashUrl, {
-            method: 'POST',
-            headers: {
-                Authorization: `Bearer ${STORAGE.upstashToken}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(['GET', STORAGE.upstashKey])
-        });
-        if (!res.ok) throw new Error(`Upstash GET ${res.status}: ${await res.text()}`);
-
-        const data = await res.json();
-        return data.result ? JSON.parse(data.result) : [];
+        const result = await upstashCommand(['GET', STORAGE.upstashKey]);
+        return result ? JSON.parse(result) : [];
     }
 
     if (STORAGE_DRIVER === 'jsonbin') {
         const res = await fetch(`https://api.jsonbin.io/v3/b/${STORAGE.jsonbinId}/latest`, {
             headers: { 'X-Master-Key': STORAGE.jsonbinKey, 'X-Bin-Meta': 'false' }
         });
-        if (!res.ok) throw new Error(`JSONBin GET ${res.status}: ${await res.text()}`);
+        const text = await res.text();
+        if (!res.ok) throw new Error(`JSONBin GET HTTP ${res.status}: ${text.slice(0, 200)}`);
 
-        const data = await res.json();
-        return Array.isArray(data) ? data : (data.record || []);
+        const data = JSON.parse(text);
+        return Array.isArray(data) ? data : (Array.isArray(data.record) ? data.record : []);
     }
 
     try {
@@ -156,15 +195,7 @@ async function storageWrite(entries) {
     const payload = JSON.stringify(entries);
 
     if (STORAGE_DRIVER === 'upstash') {
-        const res = await fetch(STORAGE.upstashUrl, {
-            method: 'POST',
-            headers: {
-                Authorization: `Bearer ${STORAGE.upstashToken}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(['SET', STORAGE.upstashKey, payload])
-        });
-        if (!res.ok) throw new Error(`Upstash SET ${res.status}: ${await res.text()}`);
+        await upstashCommand(['SET', STORAGE.upstashKey, payload]);
         return;
     }
 
@@ -177,7 +208,7 @@ async function storageWrite(entries) {
             },
             body: payload
         });
-        if (!res.ok) throw new Error(`JSONBin PUT ${res.status}: ${await res.text()}`);
+        if (!res.ok) throw new Error(`JSONBin PUT HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
         return;
     }
 
@@ -192,22 +223,45 @@ function writeFileLog(payload) {
     fs.renameSync(tmp, CONFIG.LOG_FILE);
 }
 
+// Gabungkan isi penyimpanan dengan yang ada di memori tanpa menghilangkan salah satunya
+function mergeIntoLog(remoteEntries) {
+    if (!Array.isArray(remoteEntries)) return 0;
+
+    const byId = new Map();
+    for (const entry of [...remoteEntries, ...donationLog]) {
+        if (entry && entry.id) byId.set(entry.id, entry);
+    }
+
+    const merged = [...byId.values()].sort(
+        (a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0) || a.timestamp - b.timestamp
+    );
+
+    const added = merged.length - donationLog.length;
+    donationLog.length = 0;
+    donationLog.push(...merged.slice(-CONFIG.MAX_LOG));
+
+    for (const entry of donationLog) {
+        if (Number.isFinite(entry.seq)) seqCounter = Math.max(seqCounter, entry.seq);
+        else entry.seq = ++seqCounter;
+    }
+
+    return added;
+}
+
 async function loadLog() {
     try {
-        const parsed = await storageRead();
-        if (!Array.isArray(parsed)) return;
+        const parsed = await withRetry('Baca penyimpanan', storageRead);
+        mergeIntoLog(parsed);
 
-        donationLog.push(...parsed.slice(-CONFIG.MAX_LOG));
-
-        // Entri lama belum punya seq; beri nomor urut agar sinkronisasi dashboard tetap jalan
-        for (const entry of donationLog) {
-            if (Number.isFinite(entry.seq)) seqCounter = Math.max(seqCounter, entry.seq);
-            else entry.seq = ++seqCounter;
-        }
-
+        storageState.ready = true;
+        storageState.lastError = null;
+        storageState.lastLoadedAt = Date.now();
         console.log(`[LOG] 📂 Memuat ${donationLog.length} donasi dari penyimpanan "${STORAGE_DRIVER}"`);
     } catch (error) {
-        console.warn('[LOG] ⚠️ Gagal memuat log:', error.message);
+        storageState.ready = false;
+        storageState.lastError = error.message;
+        console.error('[LOG] ❌ GAGAL membaca penyimpanan:', error.message);
+        console.error('[LOG] ❌ Penulisan ditahan agar data lama tidak tertimpa data kosong.');
     }
 }
 
@@ -233,14 +287,40 @@ async function flushLog() {
     try {
         do {
             dirty = false;
-            await storageWrite(donationLog);
+
+            // Jangan menimpa penyimpanan sebelum isinya pernah terbaca dengan sukses
+            if (!storageState.ready) {
+                const remote = await withRetry('Pemulihan baca penyimpanan', storageRead);
+                const added = mergeIntoLog(remote);
+                storageState.ready = true;
+                console.log(`[LOG] ♻️ Penyimpanan terbaca kembali (+${added} entri dari remote)`);
+            }
+
+            await withRetry('Tulis penyimpanan', storageWrite.bind(null, donationLog));
+            storageState.saves += 1;
+            storageState.lastSavedAt = Date.now();
+            storageState.lastError = null;
         } while (dirty);
     } catch (error) {
-        console.warn('[LOG] ⚠️ Gagal menyimpan log:', error.message);
+        storageState.lastError = error.message;
+        console.error('[LOG] ❌ GAGAL menyimpan log:', error.message);
     } finally {
         flushing = false;
     }
 }
+
+// Selaraskan memori dengan penyimpanan; menjaga data tetap utuh bila hosting menjalankan >1 instance
+setInterval(async () => {
+    try {
+        const remote = await storageRead();
+        const added = mergeIntoLog(remote);
+        storageState.ready = true;
+        storageState.lastLoadedAt = Date.now();
+        if (added > 0) console.log(`[LOG] 🔄 Sinkron dari penyimpanan: +${added} entri`);
+    } catch (error) {
+        storageState.lastError = error.message;
+    }
+}, 60000).unref();
 
 // Pastikan donasi terakhir ikut tersimpan saat server dimatikan/di-deploy ulang
 for (const signal of ['SIGINT', 'SIGTERM']) {
@@ -706,9 +786,11 @@ app.get('/api/stats', requireAuth, (req, res) => {
     res.json({ success: true, stats: buildStats() });
 });
 
-app.delete('/api/donations', requireAuth, (req, res) => {
+app.delete('/api/donations', requireAuth, async (req, res) => {
     donationLog.length = 0;
-    saveLog();
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    await flushLog();
     broadcast('cleared', { t: Date.now() });
     console.log(`[LOG] 🧹 Log dibersihkan oleh ${req.session.username}`);
     res.json({ success: true });
@@ -869,9 +951,16 @@ app.get('/health', (req, res) => {
         timestamp: new Date().toISOString(),
         platforms: ['saweria', 'sociabuzz', 'bagibagi', 'manual'],
         mode: 'direct-send (no queue)',
-        storage: STORAGE_DRIVER,
         logged: donationLog.length,
-        lastSeq: seqCounter
+        lastSeq: seqCounter,
+        storage: {
+            driver: storageState.driver,
+            ready: storageState.ready,
+            saves: storageState.saves,
+            lastLoadedAt: storageState.lastLoadedAt ? new Date(storageState.lastLoadedAt).toISOString() : null,
+            lastSavedAt: storageState.lastSavedAt ? new Date(storageState.lastSavedAt).toISOString() : null,
+            lastError: storageState.lastError
+        }
     });
 });
 
@@ -911,12 +1000,27 @@ app.get('/api/info', (req, res) => {
 const PORT = process.env.PORT || 3000;
 
 const STORAGE_LABEL = {
-    upstash: 'Upstash Redis (persisten)',
-    jsonbin: 'JSONBin.io (persisten)',
+    upstash: `Upstash Redis (persisten) — key ${STORAGE.upstashKey}`,
+    jsonbin: `JSONBin.io (persisten) — bin ${STORAGE.jsonbinId}`,
     file: `File lokal — ${CONFIG.LOG_FILE}`
 };
 
-loadLog().then(() => {
+// Uji tulis saat start supaya masalah kredensial ketahuan sejak awal, bukan saat donasi pertama
+async function verifyStorage() {
+    await loadLog();
+    if (!storageState.ready) return;
+
+    try {
+        await withRetry('Uji tulis penyimpanan', storageWrite.bind(null, donationLog), 2);
+        storageState.lastSavedAt = Date.now();
+        console.log(`[LOG] ✅ Penyimpanan "${STORAGE_DRIVER}" siap (baca & tulis OK)`);
+    } catch (error) {
+        storageState.lastError = error.message;
+        console.error(`[LOG] ❌ Penyimpanan "${STORAGE_DRIVER}" bisa dibaca tapi TIDAK bisa ditulis:`, error.message);
+    }
+}
+
+verifyStorage().then(() => {
     app.listen(PORT, () => {
         console.log('');
         console.log('🚀 ===============================================');
@@ -939,6 +1043,7 @@ loadLog().then(() => {
         console.log(`   • Universe ID: ${CONFIG.UNIVERSE_ID}`);
         console.log('');
         console.log(`💾 Penyimpanan log: ${STORAGE_LABEL[STORAGE_DRIVER]}`);
+        console.log(`   • Status: ${storageState.ready ? `OK (${donationLog.length} entri dimuat)` : 'GAGAL — ' + storageState.lastError}`);
         if (STORAGE_DRIVER === 'file') {
             console.log('⚠️  File lokal HILANG setiap deploy ulang di Railway/Render.');
             console.log('⚠️  Pakai volume persisten (set LOG_FILE ke path volume) atau isi');
