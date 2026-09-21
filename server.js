@@ -208,27 +208,16 @@ function parseUsers(raw) {
 const USERS = parseUsers(CONFIG.DASHBOARD_USERS);
 if (USERS.size === 0) USERS.set('admin', CONFIG.DASHBOARD_PASSWORD);
 
-// Secret disimpan ke disk bila tidak diset, supaya restart biasa tidak mementalkan user yang sedang login
-function loadSessionSecret() {
+// Tanpa SESSION_SECRET, kunci diturunkan dari konfigurasi agar nilainya sama di setiap restart & instance
+function resolveSessionSecret() {
     if (CONFIG.SESSION_SECRET) return CONFIG.SESSION_SECRET;
 
-    const file = path.join(path.dirname(CONFIG.LOG_FILE), 'session-secret');
-    try {
-        const saved = fs.readFileSync(file, 'utf8').trim();
-        if (saved) return saved;
-    } catch { /* belum ada, buat baru di bawah */ }
-
-    const secret = crypto.randomBytes(32).toString('hex');
-    try {
-        fs.mkdirSync(path.dirname(file), { recursive: true });
-        fs.writeFileSync(file, secret, { mode: 0o600 });
-    } catch (error) {
-        console.warn('[AUTH] ⚠️ Gagal menyimpan session secret:', error.message);
-    }
-    return secret;
+    return crypto.createHash('sha256')
+        .update(`${CONFIG.DASHBOARD_USERS}|${CONFIG.DASHBOARD_PASSWORD}|${CONFIG.ROBLOX_API_KEY}|${CONFIG.UNIVERSE_ID}`)
+        .digest('hex');
 }
 
-const SESSION_SECRET = loadSessionSecret();
+const SESSION_SECRET = resolveSessionSecret();
 
 function safeCompare(a, b) {
     const bufA = Buffer.from(String(a));
@@ -255,32 +244,35 @@ function createSession(username) {
     return `${Buffer.from(payload).toString('base64url')}.${signPayload(payload)}`;
 }
 
-function getSession(token) {
-    if (typeof token !== 'string' || !token) return null;
-    if (revokedTokens.has(token)) return null;
+function readSession(token) {
+    if (typeof token !== 'string' || !token) return { error: 'token tidak dikirim' };
+    if (revokedTokens.has(token)) return { error: 'token sudah di-logout' };
 
     const sep = token.lastIndexOf('.');
-    if (sep < 1) return null;
+    if (sep < 1) return { error: 'format token tidak dikenal (token lama?)' };
 
     let payload;
     try {
         payload = Buffer.from(token.slice(0, sep), 'base64url').toString('utf8');
     } catch {
-        return null;
+        return { error: 'payload token rusak' };
     }
-    if (!safeCompare(token.slice(sep + 1), signPayload(payload))) return null;
+    if (!safeCompare(token.slice(sep + 1), signPayload(payload))) {
+        return { error: 'signature tidak cocok (SESSION_SECRET / konfigurasi akun berubah?)' };
+    }
 
     const [username, expiry] = payload.split('.');
-    if (!USERS.has(username)) return null;
-    if (!Number(expiry) || Number(expiry) < Date.now()) return null;
+    if (!USERS.has(username)) return { error: `user "${username}" tidak terdaftar lagi` };
+    if (!Number(expiry) || Number(expiry) < Date.now()) return { error: 'token kedaluwarsa' };
 
-    return { username, expiry: Number(expiry) };
+    return { session: { username, expiry: Number(expiry) } };
 }
 
 function requireAuth(req, res, next) {
     const token = req.get('x-auth-token') || req.query.token;
-    const session = getSession(token);
+    const { session, error } = readSession(token);
     if (!session) {
+        console.warn(`[AUTH] ⚠️ 401 ${req.method} ${req.path} — ${error}`);
         return res.status(401).json({ success: false, error: 'Sesi tidak valid atau sudah berakhir' });
     }
     req.session = session;
@@ -749,8 +741,8 @@ app.listen(PORT, () => {
     console.log('');
     console.log(`👥 Akun dashboard (${USERS.size}): ${[...USERS.keys()].join(', ')}`);
     if (!CONFIG.SESSION_SECRET) {
-        console.log('ℹ️  SESSION_SECRET belum diset, memakai secret dari file data/session-secret.');
-        console.log('ℹ️  Di hosting dengan disk sementara (Railway/Render), set SESSION_SECRET agar sesi tidak putus tiap deploy.');
+        console.log('ℹ️  SESSION_SECRET belum diset, kunci sesi diturunkan dari konfigurasi akun.');
+        console.log('ℹ️  Catatan: mengubah akun/password akan otomatis mengakhiri sesi yang sedang berjalan.');
     }
     if (!CONFIG.DASHBOARD_USERS) {
         console.log('⚠️  PERINGATAN: Belum ada DASHBOARD_USERS, memakai akun default "admin".');

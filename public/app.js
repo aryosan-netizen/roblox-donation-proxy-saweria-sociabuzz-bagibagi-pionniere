@@ -2,8 +2,19 @@
 const TOKEN_KEY = 'donation_dashboard_token';
 
 const el = (id) => document.getElementById(id);
+
+// Token versi lama (hex tanpa titik) sudah tidak dipakai, buang agar tidak memicu 401 saat boot
+function readStoredToken() {
+    const saved = localStorage.getItem(TOKEN_KEY) || '';
+    if (saved && !saved.includes('.')) {
+        localStorage.removeItem(TOKEN_KEY);
+        return '';
+    }
+    return saved;
+}
+
 const state = {
-    token: localStorage.getItem(TOKEN_KEY) || '',
+    token: readStoredToken(),
     username: '',
     donations: [],
     filter: 'all',
@@ -14,17 +25,22 @@ const rupiah = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID');
 const timeText = (ts) => new Date(ts).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'medium' });
 
 async function api(path, options = {}) {
+    const tokenUsed = state.token;
+
     const res = await fetch(path, {
         ...options,
         headers: {
             'Content-Type': 'application/json',
-            'x-auth-token': state.token,
+            'x-auth-token': tokenUsed,
             ...(options.headers || {})
         }
     });
 
     if (res.status === 401) {
-        logout('Sesi berakhir, silakan login lagi');
+        // Abaikan respons basi dari sesi sebelumnya agar tidak mementalkan login yang baru
+        if (state.token === tokenUsed) {
+            logout('Sesi berakhir, silakan login lagi');
+        }
         throw new Error('Sesi berakhir, silakan login lagi');
     }
 
@@ -47,12 +63,14 @@ function toast(message, isError = false) {
 // ---------- AUTH ----------
 async function boot() {
     if (!state.token) return showLogin();
+
+    const tokenUsed = state.token;
     try {
         const data = await api('/api/session');
         state.username = data.username;
         showApp();
     } catch {
-        showLogin();
+        if (state.token === tokenUsed) showLogin();
     }
 }
 
