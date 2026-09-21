@@ -27,7 +27,10 @@ const CONFIG = {
     // Topic name untuk MessagingService (harus sama dengan di Roblox script)
     MESSAGING_TOPIC: 'DonationNotif',
 
-    // Password untuk login dashboard web (WAJIB diganti lewat env di production)
+    // Akun dashboard multi-user. Format: "user1:password1,user2:password2"
+    DASHBOARD_USERS: process.env.DASHBOARD_USERS || 'naufal:naufal123',
+
+    // Password akun "admin" bila DASHBOARD_USERS tidak diisi
     DASHBOARD_PASSWORD: process.env.DASHBOARD_PASSWORD || 'admin123',
 
     // Jumlah maksimum log donasi yang disimpan di memori
@@ -145,6 +148,7 @@ async function processDonation(input) {
         id: crypto.randomUUID(),
         ...donation,
         source: input.source || 'webhook',
+        by: input.by || null,
         status: roblox.success ? 'sent' : 'failed',
         error: roblox.success ? null : (roblox.error || `HTTP ${roblox.status}`),
         timestamp: Date.now()
@@ -179,11 +183,27 @@ function broadcast(event, data) {
 setInterval(() => broadcast('ping', { t: Date.now() }), 25000).unref();
 
 // ============================================
-// AUTENTIKASI DASHBOARD
+// AUTENTIKASI DASHBOARD (multi-user)
 // ============================================
-const sessions = new Map();          // token -> expiry (ms)
-const loginAttempts = new Map();     // ip -> { count, resetAt }
+const sessions = new Map();          // token -> { username, expiry }
+const loginAttempts = new Map();     // ip+username -> { count, resetAt }
 const SESSION_TTL = 12 * 60 * 60 * 1000;
+
+// "user1:pass1,user2:pass2" -> Map(username -> password)
+function parseUsers(raw) {
+    const users = new Map();
+    for (const pair of String(raw).split(',')) {
+        const sep = pair.indexOf(':');
+        if (sep < 1) continue;
+        const username = pair.slice(0, sep).trim().toLowerCase();
+        const password = pair.slice(sep + 1).trim();
+        if (username && password) users.set(username, password);
+    }
+    return users;
+}
+
+const USERS = parseUsers(CONFIG.DASHBOARD_USERS);
+if (USERS.size === 0) USERS.set('admin', CONFIG.DASHBOARD_PASSWORD);
 
 function safeCompare(a, b) {
     const bufA = Buffer.from(String(a));
@@ -192,28 +212,39 @@ function safeCompare(a, b) {
     return crypto.timingSafeEqual(bufA, bufB);
 }
 
-function createSession() {
+function verifyUser(username, password) {
+    const stored = USERS.get(username);
+    // Selalu bandingkan agar waktu respons tidak membocorkan username yang valid
+    const expected = stored ?? crypto.randomBytes(24).toString('hex');
+    const match = safeCompare(password, expected);
+    return Boolean(stored) && match;
+}
+
+function createSession(username) {
     const token = crypto.randomBytes(32).toString('hex');
-    sessions.set(token, Date.now() + SESSION_TTL);
+    sessions.set(token, { username, expiry: Date.now() + SESSION_TTL });
     return token;
 }
 
-function isValidSession(token) {
-    if (!token) return false;
-    const expiry = sessions.get(token);
-    if (!expiry) return false;
-    if (expiry < Date.now()) {
+function getSession(token) {
+    if (!token) return null;
+    const session = sessions.get(token);
+    if (!session) return null;
+    if (session.expiry < Date.now()) {
         sessions.delete(token);
-        return false;
+        return null;
     }
-    return true;
+    return session;
 }
 
 function requireAuth(req, res, next) {
     const token = req.get('x-auth-token') || req.query.token;
-    if (!isValidSession(token)) {
+    const session = getSession(token);
+    if (!session) {
         return res.status(401).json({ success: false, error: 'Unauthorized' });
     }
+    req.session = session;
+    req.sessionToken = token;
     next();
 }
 
@@ -231,8 +262,8 @@ function checkRateLimit(map, key, max, windowMs) {
 
 setInterval(() => {
     const now = Date.now();
-    for (const [token, expiry] of sessions) if (expiry < now) sessions.delete(token);
-    for (const [ip, record] of loginAttempts) if (record.resetAt < now) loginAttempts.delete(ip);
+    for (const [token, session] of sessions) if (session.expiry < now) sessions.delete(token);
+    for (const [key, record] of loginAttempts) if (record.resetAt < now) loginAttempts.delete(key);
 }, 60000).unref();
 
 // ============================================
@@ -469,28 +500,31 @@ app.post('/test', async (req, res) => {
 // ============================================
 app.post('/api/login', (req, res) => {
     const ip = req.ip || 'unknown';
-    if (!checkRateLimit(loginAttempts, ip, 10, 5 * 60 * 1000)) {
+    const username = sanitizeText(req.body?.username, 32).toLowerCase();
+    const password = String(req.body?.password ?? '');
+
+    if (!checkRateLimit(loginAttempts, `${ip}:${username}`, 10, 5 * 60 * 1000)) {
         return res.status(429).json({ success: false, error: 'Terlalu banyak percobaan login, coba lagi nanti' });
     }
 
-    const password = String(req.body?.password ?? '');
-    if (!safeCompare(password, CONFIG.DASHBOARD_PASSWORD)) {
-        console.warn(`[AUTH] ❌ Login gagal dari ${ip}`);
-        return res.status(401).json({ success: false, error: 'Password salah' });
+    if (!username || !verifyUser(username, password)) {
+        console.warn(`[AUTH] ❌ Login gagal (${username || '-'}) dari ${ip}`);
+        return res.status(401).json({ success: false, error: 'Username atau password salah' });
     }
 
-    const token = createSession();
-    console.log(`[AUTH] ✅ Login berhasil dari ${ip}`);
-    res.json({ success: true, token, expiresIn: SESSION_TTL });
+    const token = createSession(username);
+    console.log(`[AUTH] ✅ Login berhasil: ${username} dari ${ip}`);
+    res.json({ success: true, token, username, expiresIn: SESSION_TTL });
 });
 
 app.post('/api/logout', requireAuth, (req, res) => {
-    sessions.delete(req.get('x-auth-token') || req.query.token);
+    sessions.delete(req.sessionToken);
+    console.log(`[AUTH] 👋 Logout: ${req.session.username}`);
     res.json({ success: true });
 });
 
 app.get('/api/session', requireAuth, (req, res) => {
-    res.json({ success: true });
+    res.json({ success: true, username: req.session.username });
 });
 
 app.get('/api/donations', requireAuth, (req, res) => {
@@ -510,6 +544,7 @@ app.delete('/api/donations', requireAuth, (req, res) => {
     donationLog.length = 0;
     saveLog();
     broadcast('cleared', { t: Date.now() });
+    console.log(`[LOG] 🧹 Log dibersihkan oleh ${req.session.username}`);
     res.json({ success: true });
 });
 
@@ -530,14 +565,15 @@ app.post('/api/manual-donate', requireAuth, async (req, res) => {
     }
 
     console.log(`\n[MANUAL] ========== MANUAL DONATION ==========`);
-    console.log(`[MANUAL] Name: ${donatorName}, Amount: ${amount}, Message: ${message}`);
+    console.log(`[MANUAL] Oleh: ${req.session.username} | Name: ${donatorName}, Amount: ${amount}, Message: ${message}`);
 
     const entry = await processDonation({
         platform: 'manual',
         donatorName,
         amount,
         message,
-        source: 'manual'
+        source: 'manual',
+        by: req.session.username
     });
 
     if (!entry.roblox.success) {
@@ -590,6 +626,21 @@ function buildStats() {
 // ============================================
 // STATUS ENDPOINTS
 // ============================================
+app.get('/dashboard', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
+});
+
+// Status ringkas untuk lobby (tanpa data donatur)
+app.get('/api/status', (req, res) => {
+    res.json({
+        status: 'online',
+        platforms: ['saweria', 'sociabuzz', 'bagibagi', 'manual'],
+        universeId: CONFIG.UNIVERSE_ID,
+        topic: CONFIG.MESSAGING_TOPIC,
+        uptime: Math.floor(process.uptime())
+    });
+});
+
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
@@ -642,7 +693,8 @@ app.listen(PORT, () => {
     console.log('🚀 Mode: Direct Send + Web Dashboard');
     console.log('🚀 ===============================================');
     console.log(`📡 Server running on port ${PORT}`);
-    console.log(`🖥️  Dashboard: http://localhost:${PORT}`);
+    console.log(`🏛️  Lobby:     http://localhost:${PORT}`);
+    console.log(`🖥️  Dashboard: http://localhost:${PORT}/dashboard`);
     console.log('');
     console.log('📋 Webhook Endpoints:');
     console.log('   • Saweria:    POST /webhook/saweria');
@@ -655,11 +707,15 @@ app.listen(PORT, () => {
     console.log(`   • Topic: ${CONFIG.MESSAGING_TOPIC}`);
     console.log(`   • Universe ID: ${CONFIG.UNIVERSE_ID}`);
     console.log('');
-    if (CONFIG.DASHBOARD_PASSWORD === 'admin123') {
-        console.log('⚠️  PERINGATAN: Password dashboard masih default (admin123).');
-        console.log('⚠️  Set environment variable DASHBOARD_PASSWORD sebelum deploy!');
-        console.log('');
+    console.log(`👥 Akun dashboard (${USERS.size}): ${[...USERS.keys()].join(', ')}`);
+    if (!CONFIG.DASHBOARD_USERS) {
+        console.log('⚠️  PERINGATAN: Belum ada DASHBOARD_USERS, memakai akun default "admin".');
+        console.log('⚠️  Set DASHBOARD_USERS="user1:pass1,user2:pass2" agar tiap orang punya akun sendiri.');
     }
+    if (USERS.get('admin') === 'admin123') {
+        console.log('⚠️  PERINGATAN: Password masih default (admin123). Ganti sebelum deploy!');
+    }
+    console.log('');
     console.log('✅ Ready to receive donations!');
     console.log('🚀 ===============================================');
 });

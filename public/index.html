@@ -3,117 +3,134 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="robots" content="noindex, nofollow">
-    <title>Donation Dashboard — Roblox</title>
-    <link rel="stylesheet" href="style.css">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💸</text></svg>">
+    <title>Lemansion — Sistem Notifikasi Donasi Roblox</title>
+    <meta name="description" content="Sistem notifikasi donasi real-time dari Saweria, Sociabuzz, dan BagiBagi ke game Roblox.">
+    <link rel="stylesheet" href="lobby.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏛️</text></svg>">
 </head>
 <body>
 
-<!-- LOGIN -->
-<section id="loginView" class="login-view hidden">
-    <form id="loginForm" class="login-card" autocomplete="off">
-        <div class="login-logo">💸</div>
-        <h1>Donation Dashboard</h1>
-        <p class="muted">Masuk untuk melihat log &amp; kirim donasi manual</p>
-        <input type="password" id="loginPassword" placeholder="Password dashboard" required>
-        <button type="submit" class="btn primary block">Masuk</button>
-        <p id="loginError" class="error-text"></p>
-    </form>
-</section>
+<header class="nav">
+    <span class="logo">LEMANSION</span>
+    <nav class="nav-links">
+        <a href="#fitur">Fitur</a>
+        <a href="#alur">Cara Kerja</a>
+        <a href="/dashboard" class="nav-cta">Masuk Dashboard</a>
+    </nav>
+</header>
 
-<!-- DASHBOARD -->
-<section id="appView" class="app-view hidden">
-    <header class="topbar">
-        <div class="brand">
-            <span class="brand-icon">💸</span>
-            <div>
-                <h1>Donation Dashboard</h1>
-                <span class="muted small">Saweria · Sociabuzz · BagiBagi · Manual → Roblox</span>
-            </div>
+<main>
+    <section class="hero">
+        <span id="serverStatus" class="pill"><i></i> Memeriksa server...</span>
+        <h1>LEMANSION</h1>
+        <p class="tagline">Sistem Notifikasi Donasi Roblox</p>
+        <p class="desc">
+            Panduan dan middleware lengkap untuk menyalurkan donasi real-time dari
+            <strong>Saweria</strong>, <strong>Sociabuzz</strong>, dan <strong>BagiBagi.co</strong>
+            langsung ke game Roblox kamu melalui Roblox Open Cloud MessagingService —
+            lengkap dengan dashboard log donasi dan fitur donasi manual.
+        </p>
+        <div class="hero-actions">
+            <a href="/dashboard" class="btn solid">Masuk Dashboard</a>
+            <a href="#fitur" class="btn outline">Pelajari Dulu</a>
         </div>
-        <div class="topbar-right">
-            <span id="connStatus" class="status offline"><i></i> Offline</span>
-            <button id="logoutBtn" class="btn ghost">Keluar</button>
-        </div>
-    </header>
+    </section>
 
-    <main class="content">
-        <div class="stats">
-            <div class="stat-card">
-                <span class="stat-label">Total Donasi</span>
-                <strong id="statTotalCount">0</strong>
-            </div>
-            <div class="stat-card">
-                <span class="stat-label">Total Nominal</span>
-                <strong id="statTotalAmount">Rp 0</strong>
-            </div>
-            <div class="stat-card">
-                <span class="stat-label">Hari Ini</span>
-                <strong id="statTodayAmount">Rp 0</strong>
-                <span class="stat-sub" id="statTodayCount">0 donasi</span>
-            </div>
-            <div class="stat-card">
-                <span class="stat-label">Gagal Terkirim</span>
-                <strong id="statFailed" class="danger-text">0</strong>
-            </div>
+    <section class="section" id="fitur">
+        <h2>Fitur</h2>
+        <div class="cards">
+            <article class="card">
+                <span class="card-no">01</span>
+                <h3>Multi Platform</h3>
+                <p>Satu server menangani webhook Saweria, Sociabuzz, dan BagiBagi sekaligus, plus endpoint universal dengan deteksi platform otomatis.</p>
+            </article>
+            <article class="card">
+                <span class="card-no">02</span>
+                <h3>Direct Send</h3>
+                <p>Donasi diteruskan langsung ke MessagingService Roblox tanpa antrean polling, sehingga notifikasi muncul dalam hitungan detik.</p>
+            </article>
+            <article class="card">
+                <span class="card-no">03</span>
+                <h3>Log Real-time</h3>
+                <p>Setiap donasi tercatat lengkap dengan nama, nominal, pesan, dan status pengiriman. Log tampil langsung tanpa perlu refresh.</p>
+            </article>
+            <article class="card">
+                <span class="card-no">04</span>
+                <h3>Manual Donate</h3>
+                <p>Masukkan username, amount, dan message di dashboard, lalu kirim — notifikasi langsung tampil di dalam game Roblox.</p>
+            </article>
+            <article class="card">
+                <span class="card-no">05</span>
+                <h3>Multi Akun</h3>
+                <p>Setiap admin punya akun sendiri dan bisa login bersamaan. Donasi manual tercatat atas nama akun yang mengirim.</p>
+            </article>
+            <article class="card">
+                <span class="card-no">06</span>
+                <h3>Aman</h3>
+                <p>Akses dashboard dilindungi login bertoken, rate limit percobaan login, serta validasi dan sanitasi seluruh input donasi.</p>
+            </article>
         </div>
+    </section>
 
-        <div class="grid">
-            <!-- MANUAL DONATE -->
-            <div class="panel">
-                <div class="panel-head">
-                    <h2>Manual Donate</h2>
-                    <span class="muted small">Langsung masuk ke Roblox</span>
+    <section class="section" id="alur">
+        <h2>Cara Kerja</h2>
+        <ol class="steps">
+            <li>
+                <span class="step-no">1</span>
+                <div>
+                    <h3>Donatur mengirim dukungan</h3>
+                    <p>Donasi masuk lewat halaman Saweria, Sociabuzz, atau BagiBagi milik kamu.</p>
                 </div>
-                <form id="manualForm" class="form" autocomplete="off">
-                    <label for="mName">Username</label>
-                    <input type="text" id="mName" maxlength="50" placeholder="Nama donatur / username Roblox" required>
-
-                    <label for="mAmount">Amount (Rp)</label>
-                    <input type="number" id="mAmount" min="1" max="1000000000" step="1" placeholder="10000" required>
-                    <div class="quick-amounts">
-                        <button type="button" class="chip" data-amount="5000">5rb</button>
-                        <button type="button" class="chip" data-amount="10000">10rb</button>
-                        <button type="button" class="chip" data-amount="50000">50rb</button>
-                        <button type="button" class="chip" data-amount="100000">100rb</button>
-                    </div>
-
-                    <label for="mMessage">Message</label>
-                    <textarea id="mMessage" maxlength="200" rows="3" placeholder="Pesan donasi (opsional)"></textarea>
-                    <span class="counter"><span id="msgCount">0</span>/200</span>
-
-                    <button type="submit" id="manualSubmit" class="btn primary block">Kirim ke Roblox</button>
-                </form>
-            </div>
-
-            <!-- LOG -->
-            <div class="panel">
-                <div class="panel-head">
-                    <h2>Log Donasi Masuk</h2>
-                    <div class="panel-actions">
-                        <select id="filterPlatform">
-                            <option value="all">Semua platform</option>
-                            <option value="saweria">Saweria</option>
-                            <option value="sociabuzz">Sociabuzz</option>
-                            <option value="bagibagi">BagiBagi</option>
-                            <option value="manual">Manual</option>
-                            <option value="test">Test</option>
-                        </select>
-                        <button id="refreshBtn" class="btn ghost">Refresh</button>
-                        <button id="clearBtn" class="btn danger">Hapus Log</button>
-                    </div>
+            </li>
+            <li>
+                <span class="step-no">2</span>
+                <div>
+                    <h3>Webhook diterima server</h3>
+                    <p>Platform mengirim webhook ke server Lemansion, lalu datanya diseragamkan dan dicatat ke log.</p>
                 </div>
-                <div id="logList" class="log-list">
-                    <p class="empty">Belum ada donasi masuk.</p>
+            </li>
+            <li>
+                <span class="step-no">3</span>
+                <div>
+                    <h3>Diteruskan ke Roblox</h3>
+                    <p>Server memublikasikan pesan ke topic MessagingService pada Universe game kamu.</p>
                 </div>
-            </div>
-        </div>
-    </main>
-</section>
+            </li>
+            <li>
+                <span class="step-no">4</span>
+                <div>
+                    <h3>Notifikasi tampil di game</h3>
+                    <p>Script di dalam game menerima pesan dan menampilkan notifikasi donasi ke seluruh pemain.</p>
+                </div>
+            </li>
+        </ol>
+    </section>
 
-<div id="toast" class="toast hidden"></div>
+    <section class="section cta-section">
+        <h2>Siap mengelola donasi?</h2>
+        <p class="desc center">Buka dashboard untuk memantau log donasi masuk dan mengirim donasi manual.</p>
+        <a href="/dashboard" class="btn solid">Masuk Dashboard</a>
+    </section>
+</main>
 
-<script src="app.js"></script>
+<footer class="footer">
+    <span>LEMANSION</span>
+    <span class="muted">Saweria · Sociabuzz · BagiBagi · Manual → Roblox MessagingService</span>
+</footer>
+
+<script>
+    // Indikator status server pada lobby
+    fetch('/api/status')
+        .then((res) => res.json())
+        .then((data) => {
+            const node = document.getElementById('serverStatus');
+            node.classList.add('online');
+            node.lastChild.textContent = data.status === 'online' ? ' Server Online' : ' Server Bermasalah';
+        })
+        .catch(() => {
+            const node = document.getElementById('serverStatus');
+            node.lastChild.textContent = ' Server Tidak Terjangkau';
+        });
+</script>
 </body>
 </html>

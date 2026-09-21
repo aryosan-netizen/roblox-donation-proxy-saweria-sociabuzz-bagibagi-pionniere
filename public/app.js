@@ -4,6 +4,7 @@ const TOKEN_KEY = 'donation_dashboard_token';
 const el = (id) => document.getElementById(id);
 const state = {
     token: localStorage.getItem(TOKEN_KEY) || '',
+    username: '',
     donations: [],
     filter: 'all',
     stream: null
@@ -47,7 +48,8 @@ function toast(message, isError = false) {
 async function boot() {
     if (!state.token) return showLogin();
     try {
-        await api('/api/session');
+        const data = await api('/api/session');
+        state.username = data.username;
         showApp();
     } catch {
         showLogin();
@@ -57,12 +59,13 @@ async function boot() {
 function showLogin() {
     el('appView').classList.add('hidden');
     el('loginView').classList.remove('hidden');
-    el('loginPassword').focus();
+    el('loginUsername').focus();
 }
 
 function showApp() {
     el('loginView').classList.add('hidden');
     el('appView').classList.remove('hidden');
+    el('currentUser').textContent = state.username ? `@${state.username}` : '';
     loadDonations();
     loadStats();
     connectStream();
@@ -72,6 +75,7 @@ function logout() {
     if (state.stream) state.stream.close();
     state.stream = null;
     state.token = '';
+    state.username = '';
     localStorage.removeItem(TOKEN_KEY);
     setConnection(false);
     showLogin();
@@ -86,12 +90,16 @@ el('loginForm').addEventListener('submit', async (e) => {
         const res = await fetch('/api/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ password: el('loginPassword').value })
+            body: JSON.stringify({
+                username: el('loginUsername').value,
+                password: el('loginPassword').value
+            })
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.token) throw new Error(data.error || 'Login gagal');
 
         state.token = data.token;
+        state.username = data.username;
         localStorage.setItem(TOKEN_KEY, data.token);
         el('loginPassword').value = '';
         showApp();
@@ -125,7 +133,7 @@ function connectStream() {
         state.donations.unshift(entry);
         renderLog();
         loadStats();
-        if (entry.source !== 'manual') {
+        if (!(entry.source === 'manual' && entry.by === state.username)) {
             toast(`Donasi baru: ${entry.donatorName} — ${rupiah(entry.amount)}`);
         }
     });
@@ -219,6 +227,12 @@ function buildLogItem(entry) {
     platform.className = `badge ${entry.platform}`;
     platform.textContent = entry.platform;
     meta.appendChild(platform);
+
+    if (entry.by) {
+        const by = document.createElement('span');
+        by.textContent = `oleh @${entry.by}`;
+        meta.appendChild(by);
+    }
 
     if (entry.status === 'failed') {
         const failed = document.createElement('span');
