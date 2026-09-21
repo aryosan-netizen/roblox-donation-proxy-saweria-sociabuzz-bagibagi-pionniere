@@ -108,8 +108,8 @@ const STORAGE = {
     upstashUrl: process.env.UPSTASH_REDIS_REST_URL || '',
     upstashToken: process.env.UPSTASH_REDIS_REST_TOKEN || '',
     upstashKey: process.env.UPSTASH_KEY || 'lemansion:donations',
-    jsonbinKey: process.env.JSONBIN_KEY || '',
-    jsonbinId: process.env.JSONBIN_BIN_ID || ''
+    jsonbinKey: process.env.JSONBIN_KEY || '$2a$10$rGEdNs4ob68SQ4yQT5gr9eC5U.P0RBN2EChhyCAUF0TjUzWWaFHFy',
+    jsonbinId: process.env.JSONBIN_BIN_ID || '6ab0f691ffd5d160531ecc7f '
 };
 
 // Driver ditentukan dari env yang tersedia; file lokal jadi cadangan terakhir
